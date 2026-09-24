@@ -277,8 +277,8 @@ The full journey to a working recognition system, in order.
 ### Step 1 — Get the code
 
 ```bash
-git clone https://github.com/kabanda-jordan/face-rec-locking.git
-cd face-rec-locking
+git clone https://github.com/kabanda-jordan/FaceLocking.git
+cd FaceLocking
 ```
 
 ### Step 2 — Create and activate a virtual environment
