@@ -277,8 +277,8 @@ The full journey to a working recognition system, in order.
 ### Step 1 — Get the code
 
 ```bash
-git clone https://github.com/kabanda-jordan/face-recognition.git
-cd face-recognition
+git clone https://github.com/kabanda-jordan/face-rec-locking.git
+cd face-rec-locking
 ```
 
 ### Step 2 — Create and activate a virtual environment
@@ -746,6 +746,7 @@ What the tests verify (see `tests/`):
 |----------------------------------------------------------------|-----|
 | `pip` says the requirements cannot be found                     | activate the virtual environment first (`Step 2`) |
 | `import onnxruntime` fails                                     | `pip install -r requirements.txt` inside the venv |
+| Qt prints `QFontDatabase: Cannot find font directory`          | restart the live command; the project automatically prepares OpenCV 5's missing `cv2/qt/fonts` directory on Linux. If it persists, install `fonts-dejavu-core` and retry |
 | expression labels are missing                                  | run `python -m scripts.download_models`; confirm `models/emotion-ferplus-8.onnx` exists, or use `--no-expressions` |
 | expression is `uncertain` too often                            | improve lighting/face size, or lower `--expression-threshold` after checking false positives |
 | download hangs / interrupted                                   | run `python -m scripts.download_models` again — it resumes partial downloads |

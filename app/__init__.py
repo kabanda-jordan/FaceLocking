@@ -11,7 +11,16 @@ This package is split by responsibility:
   tracking.py      one-face lock + landmark motion tracking for the live overlay
   enrollment.py    turning raw face photos into stored per-identity embeddings
   recognition.py   composes detector -> aligner -> embedder -> matcher -> expression
+  qt_compat.py     Linux/OpenCV Qt font and display compatibility
   utils.py         small shared helpers (normalization, image I/O, ...)
 """
 
 __version__ = "1.1.0"
+
+
+# Prepare the OpenCV Qt plugin before any live-camera window is created.  This
+# is deliberately done at package import time because the warning is emitted
+# when Qt initializes, not when ``cv2`` is first imported.
+from .qt_compat import prepare_qt  # noqa: E402
+
+prepare_qt()
