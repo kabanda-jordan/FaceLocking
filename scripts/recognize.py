@@ -129,7 +129,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="show a portrait-shaped window with letterboxing (do not rotate the face)",
     )
     parser.add_argument(
-        "--rotate", type=int, choices=(0, 90, 180, 270), default=0,
+        "--rotate", type=int, choices=(0, 90, 180, 270), default=None,
         help="override the auto-detected camera rotation (0, 90, 180, or 270)",
     )
     parser.add_argument(
@@ -846,10 +846,13 @@ def main() -> int:
         )
         return 1
 
-    if args.external_camera and args.rotate == 0:
-        # Probe the stream orientation when possible. This handles both
-        # portrait external cameras and already-upright alternate UVC nodes.
-        args.rotate = detected_rotation
+    if args.rotate is None:
+        if args.external_camera:
+            # Probe the stream orientation when possible. This handles both
+            # portrait external cameras and already-upright alternate UVC nodes.
+            args.rotate = detected_rotation
+        else:
+            args.rotate = 0
 
     if used_index != args.camera and not args.external_camera:
         print(f"NOTE: using camera index {used_index} "
