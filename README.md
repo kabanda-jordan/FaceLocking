@@ -474,7 +474,7 @@ Options:
 
 ```bash
 python -m scripts.recognize --camera 1                    # force a specific camera index
-python -m scripts.recognize --external-camera           # camera 2 + rotate 90
+python -m scripts.recognize --external-camera           # prefer camera 2; fall back to PC camera
 python -m scripts.recognize --external-camera --lock-face
 python -m scripts.recognize --threshold 0.5
 python -m scripts.recognize --skip 5 --det-size 480       # faster labels on a low-end CPU
@@ -485,6 +485,12 @@ python -m scripts.recognize --lock-face                   # start locked to the 
 python -m scripts.recognize --expressions-only           # no identity enrollment required
 python -m scripts.recognize --expressions-only --lock-face
 ```
+
+`--external-camera` is a preference, not a hard-coded device requirement: it
+opens camera 2 first (with the required 90° rotation), then automatically tries
+the PC camera indices when the USB camera is unplugged. The selected camera and
+rotation are printed at startup. To force the built-in PC camera instead, use
+`--camera 0` and omit `--external-camera`.
 
 The overlay includes both identity and expression, for example
 `alice 0.91 | Smile 0.84`. The worker uses the newest camera frame only once
@@ -608,8 +614,8 @@ Streams the webcam and draws a box + label on every face.
 | flag            | default  | meaning                                              |
 |-----------------|----------|------------------------------------------------------|
 | `--camera N`    | `0`      | preferred webcam device index                        |
-| `--external-camera` | off  | use camera 2 and rotate 90° automatically          |
-| `--rotate DEG`  | `0`      | rotate frames before detection (`90` for a sideways external camera) |
+| `--external-camera` | off  | prefer camera 2 and rotate 90°; fall back to a PC camera automatically |
+| `--rotate DEG`  | `0`      | rotate frames before detection (external camera 2 defaults to 90°; PC fallback to 0°) |
 | `--no-landmarks` | off     | hide face-part squares and movement trails          |
 | `--motion-threshold F` | `0.035` | normalized landmark movement for `MOVING`       |
 | `--threshold F` | `0.40`   | Known/Unknown boundary                               |

@@ -3,7 +3,7 @@
 Usage (from the root project folder):
     python -m scripts.recognize
     python -m scripts.recognize --camera 0 --threshold 0.4
-    python -m scripts.recognize --external-camera       # camera 2 + rotate 90
+    python -m scripts.recognize --external-camera       # prefer camera 2; fall back to PC camera
     python -m scripts.recognize --camera 2 --rotate 90    # equivalent
     python -m scripts.recognize --lock-face               # track one face
     python -m scripts.recognize --skip 2 --det-size 480   # faster on CPU
@@ -77,7 +77,7 @@ def build_parser() -> argparse.ArgumentParser:
                         help="webcam device index (0 = default)")
     parser.add_argument(
         "--external-camera", action="store_true",
-        help="use camera 2 and rotate its sideways feed by 90 degrees",
+        help="prefer external camera 2 (rotate 90); automatically fall back to a PC camera when absent",
     )
     parser.add_argument("--threshold", type=float, default=MATCHING_THRESHOLD,
                         help="cosine-similarity threshold for Known/Unknown")
@@ -117,7 +117,7 @@ def build_parser() -> argparse.ArgumentParser:
                         help="camera resolution WxH (e.g. 1280x720)")
     parser.add_argument(
         "--rotate", type=int, choices=(0, 90, 180, 270), default=0,
-        help="rotate each camera frame before detection (use 90 for this external camera)",
+        help="rotate each camera frame before detection (external camera 2 defaults to 90; PC fallback defaults to 0)",
     )
     parser.add_argument(
         "--no-landmarks", action="store_true",
@@ -158,6 +158,18 @@ def _rotate_frame(frame: np.ndarray, degrees: int) -> np.ndarray:
     return frame
 
 
+def _camera_candidates(preferred: int, max_tries: int = 4):
+    """Return the preferred camera first, then the other local indices.
+
+    Camera indices are not stable when a USB device is unplugged. Wrapping the
+    fallback list is what lets ``--external-camera`` prefer index 2 but still
+    open the built-in PC camera at index 0 when index 2 disappears.
+    """
+    indices = [preferred]
+    indices.extend(index for index in range(max_tries) if index != preferred)
+    return indices
+
+
 def open_usable_camera(preferred: int, max_tries: int = 4, res: tuple = (640, 480)):
     """Open the preferred camera, falling back to any working device.
 
@@ -166,7 +178,7 @@ def open_usable_camera(preferred: int, max_tries: int = 4, res: tuple = (640, 48
     default raw/RGB pipeline. We then warm the camera up (auto-exposure /
     white-balance need a few frames) and require real (non-black) content.
     """
-    for idx in range(preferred, max_tries):
+    for idx in _camera_candidates(preferred, max_tries):
         cap = cv2.VideoCapture(idx)
         if not cap.isOpened():
             continue
@@ -486,9 +498,9 @@ def recognition_worker(
 def main() -> int:
     args = build_parser().parse_args()
     if args.external_camera:
+        # Prefer the known external index, but let open_usable_camera() fall
+        # back to a PC camera when the USB device is not connected.
         args.camera = 2
-        if args.rotate == 0:
-            args.rotate = 90
 
     if args.no_expressions and args.expressions_only:
         print(
@@ -575,13 +587,22 @@ def main() -> int:
 
     cap, used_index = open_usable_camera(args.camera, res=(width, height))
     if cap is None:
+        candidates = _camera_candidates(args.camera)
         print(
-            f"ERROR: could not find a working webcam (tried indices {args.camera}.."
-            f"{args.camera + 3}). Close other apps using the camera and try again.",
+            "ERROR: could not find a working webcam (tried indices "
+            f"{', '.join(str(index) for index in candidates)}). "
+            "Close other apps using the camera and try again.",
             file=sys.stderr,
         )
         return 1
-    if used_index != args.camera:
+
+    if args.external_camera and args.rotate == 0:
+        # The original external feed is sideways.  A fallback PC camera is
+        # already upright, so do not rotate it just because the external
+        # device was absent at startup.
+        args.rotate = 90 if used_index == 2 else 0
+
+    if used_index != args.camera and not args.external_camera:
         print(f"NOTE: using camera index {used_index} "
               f"(index {args.camera} was black or unavailable).")
 
@@ -613,7 +634,13 @@ def main() -> int:
 
     print(f"Saved photos/videos go to: {DOWNLOADS_DIR}")
     if args.external_camera:
-        print("External camera mode: device 2, rotated 90 degrees")
+        if used_index == 2:
+            print("External camera mode: device 2, rotated 90 degrees")
+        else:
+            print(
+                f"External camera unavailable; using PC camera index {used_index} "
+                f"(rotation {args.rotate} degrees)"
+            )
     print("Controls: s = save photo | r = start/stop video | l = lock face | q/ESC = quit")
     if pipeline.expression_classifier is not None:
         print("Expressions: smile / laugh / angry are shown after each face label")
