@@ -62,6 +62,11 @@ EMBEDDING_DIMENSION = 512
 # does not stop identity recognition, but expression fields will be None.
 EXPRESSION_INPUT_SIZE = (64, 64)
 EXPRESSION_CONFIDENCE = float(os.environ.get("FR_EXPRESSION_CONFIDENCE", "0.40"))
+# FER+ is conservative about anger on webcam crops.  Use a slightly lower,
+# dedicated threshold while still requiring anger to be the model's top class.
+EXPRESSION_ANGER_THRESHOLD = float(
+    os.environ.get("FR_EXPRESSION_ANGER_THRESHOLD", "0.25")
+)
 EXPRESSION_MOUTH_OPEN_THRESHOLD = float(
     os.environ.get("FR_EXPRESSION_MOUTH_OPEN_THRESHOLD", "0.45")
 )

@@ -3,7 +3,7 @@
 Usage (from the root project folder):
     python -m scripts.recognize
     python -m scripts.recognize --camera 0 --threshold 0.4
-    python -m scripts.recognize --external-camera       # prefer camera 2; fall back to PC camera
+    python -m scripts.recognize --external-camera       # logical camera 1; auto stream/rotation
     python -m scripts.recognize --camera 2 --rotate 90    # equivalent
     python -m scripts.recognize --lock-face               # track one face
     python -m scripts.recognize --skip 2 --det-size 480   # faster on CPU
@@ -49,6 +49,7 @@ from app.config import (                            # noqa: E402
     DETECTOR_NMS,
     DOWNLOADS_DIR,
     EXPRESSION_CONFIDENCE,
+    EXPRESSION_ANGER_THRESHOLD,
     EXPRESSION_INPUT_SIZE,
     EXPRESSION_LAUGH_FRAMES,
     EXPRESSION_MODEL_PATH,
@@ -74,10 +75,10 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--camera", type=int, default=0,
-                        help="webcam device index (0 = default)")
+                        help="logical camera: 0 = PC camera, 1 = external camera")
     parser.add_argument(
         "--external-camera", action="store_true",
-        help="prefer external camera 2 (rotate 90); automatically fall back to a PC camera when absent",
+        help="prefer the external camera, auto-detect its stream/orientation, and fall back to a PC camera when absent",
     )
     parser.add_argument("--threshold", type=float, default=MATCHING_THRESHOLD,
                         help="cosine-similarity threshold for Known/Unknown")
@@ -98,6 +99,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="minimum FER+ confidence before an expression is reported",
     )
     parser.add_argument(
+        "--anger-threshold", type=float, default=EXPRESSION_ANGER_THRESHOLD,
+        help="minimum top-class FER+ anger confidence (default: 0.25)",
+    )
+    parser.add_argument(
         "--mouth-open-threshold", type=float,
         default=EXPRESSION_MOUTH_OPEN_THRESHOLD,
         help="visual mouth-open score used to promote smile to laugh",
@@ -116,8 +121,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--res", default="640x480",
                         help="camera resolution WxH (e.g. 1280x720)")
     parser.add_argument(
+        "--preview-scale", type=float, default=None,
+        help="display-only window scale (external camera default: 0.75)",
+    )
+    parser.add_argument(
         "--rotate", type=int, choices=(0, 90, 180, 270), default=0,
-        help="rotate each camera frame before detection (external camera 2 defaults to 90; PC fallback defaults to 0)",
+        help="override the auto-detected camera rotation (0, 90, 180, or 270)",
     )
     parser.add_argument(
         "--no-landmarks", action="store_true",
@@ -130,6 +139,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--lock-face", action="store_true",
         help="lock the overlay to the largest visible face and track it",
+    )
+    parser.add_argument(
+        "--target-name", default=None,
+        help="lock only this enrolled identity, e.g. 'Kabanda Jordan'",
     )
     return parser
 
@@ -170,32 +183,174 @@ def _camera_candidates(preferred: int, max_tries: int = 4):
     return indices
 
 
-def open_usable_camera(preferred: int, max_tries: int = 4, res: tuple = (640, 480)):
-    """Open the preferred camera, falling back to any working device.
+def _camera_sources(
+    preferred: int,
+    max_tries: int = 4,
+    external: bool = False,
+    device_paths: bool = False,
+):
+    """Return ``(logical_index, open_source)`` pairs for camera probing.
 
-    Requests the MJPG codec + the given resolution and a high FPS target: many
-    webcams deliver more frames with MJPG and a smaller frame than on their
-    default raw/RGB pipeline. We then warm the camera up (auto-exposure /
-    white-balance need a few frames) and require real (non-black) content.
+    On Linux, logical camera ``0`` is the built-in PC camera and logical camera
+    ``1`` is the external camera (normally physical ``/dev/video2``). PC mode
+    never silently selects an external USB stream.
     """
-    for idx in _camera_candidates(preferred, max_tries):
-        cap = cv2.VideoCapture(idx)
-        if not cap.isOpened():
+    if not device_paths:
+        if external and preferred == 1:
+            indices = [1, 0, 2, 3]
+        elif external and preferred == 2:
+            indices = [2, 0, 1, 3]
+        elif not external and preferred == 0:
+            indices = [0, 1]
+        else:
+            indices = _camera_candidates(preferred, max_tries)
+        return [(index, index) for index in indices]
+
+    available = []
+    for name in os.listdir("/dev"):
+        if not name.startswith("video") or not name[5:].isdigit():
             continue
-        try:
-            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
-        except AttributeError:
-            pass
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, res[0])
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, res[1])
-        cap.set(cv2.CAP_PROP_FPS, 60)  # ask high; the camera gives what it can
-        # warm up a few frames so auto-exposure/auto-white-balance settle
-        for _ in range(8):
-            ok, frame = cap.read()
-        if ok and _frame_is_usable(frame):
-            return cap, idx
+        index = int(name[5:])
+        if 0 <= index < 32:
+            available.append(index)
+    available.sort()
+    if not available:
+        return []
+
+    if external and preferred == 1:
+        order = [2, 0, 1, 3]
+    elif external and preferred == 2:
+        order = [2, 3, 0, 1]
+    elif not external and preferred == 0:
+        # Keep camera 0 strictly on the PC camera nodes.
+        order = [0, 1]
+    else:
+        order = [preferred] + [index for index in available if index != preferred]
+    ordered = []
+    for index in order:
+        if index in available and index not in ordered:
+            ordered.append(index)
+    if not external and preferred == 0:
+        ordered = [index for index in ordered if index in (0, 1)]
+    ordered.extend(index for index in available if index not in ordered)
+    if not external and preferred == 0:
+        ordered = [index for index in ordered if index in (0, 1)]
+
+    sources = []
+    for index in ordered:
+        if external and index in (2, 3):
+            logical_index = preferred
+        elif external and index == 1:
+            logical_index = preferred
+        else:
+            logical_index = index
+        sources.append((logical_index, f"/dev/video{index}"))
+    return sources
+
+
+def _open_camera_capture(source, res: tuple):
+    """Open and warm one camera index, returning its capture and last frame."""
+    if isinstance(source, str):
+        cap = cv2.VideoCapture(source, cv2.CAP_V4L2)
+    else:
+        cap = cv2.VideoCapture(source)
+    if not cap.isOpened():
+        return None, None
+    try:
+        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+    except AttributeError:
+        pass
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, res[0])
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, res[1])
+    cap.set(cv2.CAP_PROP_FPS, 60)
+    frame = None
+    for _ in range(8):
+        ok, candidate = cap.read()
+        if ok:
+            frame = candidate
+    if frame is None or not _frame_is_usable(frame):
         cap.release()
-    return None, None
+        return None, None
+    return cap, frame
+
+
+def _camera_frame_score(frame, detector):
+    """Score a frame by the best face count/confidence across rotations."""
+    best = (0, 0.0, 0)
+    # External webcams in portrait mode commonly need 90 or 270 degrees;
+    # checking all four also handles a PC camera mounted sideways.
+    for rotation in (0, 90, 180, 270):
+        try:
+            detections = detector.detect(_rotate_frame(frame, rotation))
+        except Exception:
+            detections = []
+        if detections:
+            confidence = max(float(item.confidence) for item in detections)
+            score = (len(detections), confidence, -rotation)
+            if score > best:
+                best = (score[0], score[1], rotation)
+    return best
+
+
+def open_usable_camera(
+    preferred: int,
+    max_tries: int = 4,
+    res: tuple = (640, 480),
+    face_detector=None,
+    auto_rotate: bool = False,
+    device_paths: bool = False,
+):
+    """Open the best usable camera and return ``(capture, index, rotation)``.
+
+    With ``face_detector`` supplied, candidate streams are briefly probed and
+    the stream/orientation producing the strongest face detection wins. This
+    handles UVC cameras that expose multiple video nodes and portrait mounts.
+    """
+    candidates = _camera_sources(
+        preferred,
+        max_tries,
+        external=auto_rotate,
+        device_paths=device_paths,
+    )
+
+    if face_detector is not None and auto_rotate:
+        external_best = None
+        pc_best = None
+        for reported_index, source in candidates:
+            cap, frame = _open_camera_capture(source, res)
+            if cap is None:
+                continue
+            score = _camera_frame_score(frame, face_detector)
+            candidate = (score, reported_index, source)
+            if external and reported_index != 0:
+                if external_best is None or score[:2] > external_best[0][:2]:
+                    external_best = candidate
+            elif pc_best is None or score[:2] > pc_best[0][:2]:
+                pc_best = candidate
+            cap.release()
+        # Prefer any usable external stream over the PC camera, even when the
+        # external view currently contains no detectable face. The centering
+        # guide will explain that physical framing issue.
+        best = external_best or pc_best
+        if best is None:
+            return None, None, 0
+        score, selected_index, selected_source = best
+        cap, _ = _open_camera_capture(selected_source, res)
+        if cap is None:
+            return None, None, 0
+        if score[0] == 0 and selected_index != 0:
+            # No face was visible during probing; retain the known external
+            # camera's portrait-to-landscape correction as a safe default.
+            selected_rotation = 90
+        else:
+            selected_rotation = score[2]
+        return cap, selected_index, selected_rotation
+
+    for reported_index, source in candidates:
+        cap, _ = _open_camera_capture(source, res)
+        if cap is not None:
+            return cap, reported_index, 0
+    return None, None, 0
 
 
 def _timestamp_stamp() -> str:
@@ -231,14 +386,21 @@ def _draw(
     # camera was held farther away.
     marker_half = int(np.clip(round(max(1, x2 - x1) * 0.035), 5, 14))
 
+    identity = getattr(result.match, "identity", None)
     identity_label = result.match.display_label
-    if locked:
+    if locked and identity is None:
+        # Expression-only mode has no enrolled identity to display. Do not
+        # paint a misleading "LOCK Unknown" label over the face box.
+        identity_label = ""
+    elif locked:
         identity_label = f"LOCK {identity_label}"
     expression = getattr(result, "expression", None)
     expression_label = expression.display_label if expression is not None else ""
     label = identity_label
     if expression_label:
         label += f" | {expression_label}"
+    if not label:
+        label = "Scanning"
     (text_w, text_h), _baseline = cv2.getTextSize(
         label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 1
     )
@@ -328,6 +490,7 @@ def _draw_status_bar(
     recording: bool,
     record_start,
     lock_status: str = "off",
+    target_name: str = None,
 ):
     """Top-left strip: FPS + lock/REC indicators + key hints."""
     h, w = annotated.shape[:2]
@@ -337,14 +500,29 @@ def _draw_status_bar(
                 (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.55,
                 (255, 255, 0), 1, cv2.LINE_AA)
 
-    lock_color = (0, 220, 255) if lock_status == "on" else (180, 180, 180)
-    cv2.putText(bar, f"face lock: {lock_status}", (150, 30),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.5, lock_color, 1, cv2.LINE_AA)
+    if target_name:
+        if lock_status == "on":
+            lock_text = f"locked: {target_name}"
+            lock_color = (0, 220, 255)
+        elif lock_status == "lost":
+            lock_text = f"lost: {target_name}"
+            lock_color = (0, 0, 255)
+        elif lock_status == "searching":
+            lock_text = f"searching: {target_name}"
+            lock_color = (0, 220, 255)
+        else:
+            lock_text = f"target: {target_name}"
+            lock_color = (180, 180, 180)
+    else:
+        lock_text = f"face lock: {lock_status}"
+        lock_color = (0, 220, 255) if lock_status == "on" else (180, 180, 180)
+    cv2.putText(bar, lock_text, (150, 30),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.45, lock_color, 1, cv2.LINE_AA)
 
     hint = "s save | r record | l lock | q quit"
-    (tw, th), _ = cv2.getTextSize(hint, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
-    cv2.putText(bar, hint, (max(300, w - tw - 12), 30),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+    (tw, th), _ = cv2.getTextSize(hint, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)
+    cv2.putText(bar, hint, (max(360, w - tw - 12), 30),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.45,
                 (200, 200, 200), 1, cv2.LINE_AA)
 
     if recording:
@@ -378,7 +556,11 @@ def _labeled_frame(
     return annotated
 
 
-def _draw_face_guide(annotated: np.ndarray, lock_status: str) -> None:
+def _draw_face_guide(
+    annotated: np.ndarray,
+    lock_status: str,
+    target_name: str = None,
+) -> None:
     """Show an actionable framing guide while no face is selected.
 
     A dark/backlit or side-facing frame cannot produce trustworthy landmarks.
@@ -403,10 +585,17 @@ def _draw_face_guide(annotated: np.ndarray, lock_status: str) -> None:
     cv2.line(annotated, (left, (top + bottom) // 2), (right, (top + bottom) // 2),
              (0, 210, 255), 1, cv2.LINE_AA)
 
-    message = "NO FACE DETECTED"
-    detail = "CENTER YOUR FACE AND LOOK AT THE CAMERA"
-    if lock_status == "searching":
-        detail = "PRESS L TO UNLOCK - THEN CENTER YOUR FACE"
+    if target_name and lock_status == "lost":
+        message = f"LOST: {target_name.upper()}"
+        detail = "MOVE BACK INTO VIEW - THE TARGET WILL REACQUIRE"
+    elif target_name and lock_status == "searching":
+        message = f"SEARCHING: {target_name.upper()}"
+        detail = "CENTER YOUR FACE AND LOOK AT THE CAMERA"
+    else:
+        message = "NO FACE DETECTED"
+        detail = "CENTER YOUR FACE AND LOOK AT THE CAMERA"
+        if lock_status == "searching":
+            detail = "PRESS L TO UNLOCK - THEN CENTER YOUR FACE"
     cv2.rectangle(annotated, (0, height - 72), (width, height), (18, 18, 18), -1)
     cv2.putText(annotated, message, (16, height - 46),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 210, 255), 2, cv2.LINE_AA)
@@ -497,10 +686,27 @@ def recognition_worker(
 
 def main() -> int:
     args = build_parser().parse_args()
+    # Camera 1 is the project's logical external-camera selector. Camera 0 is
+    # always the built-in PC camera. The Linux backend maps logical camera 1
+    # to the physical UVC device (usually /dev/video2).
+    if args.camera == 1:
+        args.external_camera = True
     if args.external_camera:
-        # Prefer the known external index, but let open_usable_camera() fall
-        # back to a PC camera when the USB device is not connected.
-        args.camera = 2
+        args.camera = 1
+    if args.target_name:
+        args.lock_face = True
+        if args.expressions_only:
+            print(
+                "ERROR: --target-name requires identity mode; remove "
+                "--expressions-only and enroll the target first.",
+                file=sys.stderr,
+            )
+            return 1
+    if args.preview_scale is None:
+        args.preview_scale = 0.75 if args.external_camera else 1.0
+    if not 0.1 <= args.preview_scale <= 1.0:
+        print("ERROR: --preview-scale must be between 0.1 and 1.0.", file=sys.stderr)
+        return 1
 
     if args.no_expressions and args.expressions_only:
         print(
@@ -544,6 +750,7 @@ def main() -> int:
                 model_path=args.expression_model,
                 input_size=EXPRESSION_INPUT_SIZE,
                 confidence_threshold=args.expression_threshold,
+                anger_threshold=args.anger_threshold,
                 mouth_open_threshold=args.mouth_open_threshold,
                 laugh_frames=args.laugh_frames,
             )
@@ -575,6 +782,14 @@ def main() -> int:
         )
         return 1
 
+    if args.target_name and not pipeline.matcher.has_enrollments():
+        print(
+            "ERROR: --target-name needs an enrollment database. Put photos in "
+            "data/faces/<person>/ and run `python -m scripts.enroll` first.",
+            file=sys.stderr,
+        )
+        return 1
+
     stabilizer = None
     if pipeline.expression_classifier is not None:
         stabilizer = ExpressionStabilizer(
@@ -585,7 +800,13 @@ def main() -> int:
     else:
         print("NOTE: expression labels are disabled; identity recognition is still active.")
 
-    cap, used_index = open_usable_camera(args.camera, res=(width, height))
+    cap, used_index, detected_rotation = open_usable_camera(
+        args.camera,
+        res=(width, height),
+        face_detector=pipeline.detector if args.external_camera else None,
+        auto_rotate=args.external_camera,
+        device_paths=sys.platform.startswith("linux"),
+    )
     if cap is None:
         candidates = _camera_candidates(args.camera)
         print(
@@ -597,10 +818,9 @@ def main() -> int:
         return 1
 
     if args.external_camera and args.rotate == 0:
-        # The original external feed is sideways.  A fallback PC camera is
-        # already upright, so do not rotate it just because the external
-        # device was absent at startup.
-        args.rotate = 90 if used_index == 2 else 0
+        # Probe the stream orientation when possible. This handles both
+        # portrait external cameras and already-upright alternate UVC nodes.
+        args.rotate = detected_rotation
 
     if used_index != args.camera and not args.external_camera:
         print(f"NOTE: using camera index {used_index} "
@@ -608,7 +828,7 @@ def main() -> int:
 
     # Face lock is applied to the latest recognition results in the display
     # loop, so the expensive worker can keep processing frames independently.
-    face_lock = FaceLock()
+    face_lock = FaceLock(target_identity=args.target_name)
     if args.lock_face:
         face_lock.enable()
     motion_tracker = LandmarkMotionTracker(
@@ -634,8 +854,11 @@ def main() -> int:
 
     print(f"Saved photos/videos go to: {DOWNLOADS_DIR}")
     if args.external_camera:
-        if used_index == 2:
-            print("External camera mode: device 2, rotated 90 degrees")
+        if used_index in (1, 2, 3):
+            print(
+                f"External camera mode: device {used_index}, "
+                f"rotation {args.rotate} degrees (auto-detected)"
+            )
         else:
             print(
                 f"External camera unavailable; using PC camera index {used_index} "
@@ -645,7 +868,10 @@ def main() -> int:
     if pipeline.expression_classifier is not None:
         print("Expressions: smile / laugh / angry are shown after each face label")
     if args.lock_face:
-        print("Face lock ON - the largest visible face will be selected")
+        if args.target_name:
+            print(f"Face lock ON - targeting enrolled identity: {args.target_name}")
+        else:
+            print("Face lock ON - the largest visible face will be selected")
     if args.expressions_only:
         print("Identity gallery is not required in --expressions-only mode")
     fps_window = 30
@@ -675,7 +901,11 @@ def main() -> int:
                 show_landmarks=not args.no_landmarks,
             )
             if not display_results:
-                _draw_face_guide(annotated, face_lock.status)
+                _draw_face_guide(
+                    annotated,
+                    face_lock.status,
+                    target_name=args.target_name,
+                )
 
             # display-rate counter so you can SEE the video is not slowed down
             fps_times.append(t0)
@@ -696,8 +926,18 @@ def main() -> int:
                 writer is not None,
                 record_start,
                 lock_status=face_lock.status,
+                target_name=args.target_name,
             )
-            cv2.imshow("Face Recognition + Expressions (ArcFace + FER+)", annotated)
+            display_frame = annotated
+            if abs(args.preview_scale - 1.0) > 1e-6:
+                display_frame = cv2.resize(
+                    annotated,
+                    None,
+                    fx=args.preview_scale,
+                    fy=args.preview_scale,
+                    interpolation=cv2.INTER_AREA,
+                )
+            cv2.imshow("Face Recognition + Expressions (ArcFace + FER+)", display_frame)
             key = cv2.waitKey(1) & 0xFF
 
             # ---- face lock toggle: 'l' ----------------------------------

@@ -22,6 +22,7 @@ from .config import (
     EMBEDDER_MODEL_PATH,
     EMBEDDINGS_NPZ_PATH,
     EXPRESSION_CONFIDENCE,
+    EXPRESSION_ANGER_THRESHOLD,
     EXPRESSION_ENABLED,
     EXPRESSION_INPUT_SIZE,
     EXPRESSION_LAUGH_FRAMES,
@@ -60,6 +61,7 @@ class RecognitionPipeline:
         expression_classifier: Optional[ExpressionClassifier] = None,
         threshold: Optional[float] = None,
         expression_threshold: Optional[float] = None,
+        expression_anger_threshold: Optional[float] = None,
         enable_expressions: bool = EXPRESSION_ENABLED,
         enable_identity: bool = True,
     ) -> None:
@@ -99,6 +101,11 @@ class RecognitionPipeline:
                         expression_threshold
                         if expression_threshold is not None
                         else EXPRESSION_CONFIDENCE
+                    ),
+                    anger_threshold=(
+                        expression_anger_threshold
+                        if expression_anger_threshold is not None
+                        else EXPRESSION_ANGER_THRESHOLD
                     ),
                     mouth_open_threshold=EXPRESSION_MOUTH_OPEN_THRESHOLD,
                     laugh_frames=EXPRESSION_LAUGH_FRAMES,

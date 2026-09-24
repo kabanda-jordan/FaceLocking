@@ -62,6 +62,23 @@ class TestExpressionPolicy:
         assert result.label == "angry"
         assert result.is_angry
 
+    def test_anger_threshold_reports_lower_confidence_top_class(self):
+        result = expression_from_probabilities(
+            [0.30, 0.0, 0.20, 0.15, 0.35, 0.0, 0.0, 0.0],
+            confidence_threshold=0.40,
+            anger_threshold=0.25,
+        )
+        assert result.label == "angry"
+        assert result.is_angry
+
+    def test_anger_does_not_override_a_stronger_neutral_class(self):
+        result = expression_from_probabilities(
+            probabilities(neutral=0.60, angry=0.30),
+            confidence_threshold=0.40,
+            anger_threshold=0.25,
+        )
+        assert result.label == "neutral"
+
     def test_low_confidence_is_uncertain(self):
         # No class is above the 0.40 reporting threshold.
         values = np.full(len(EMOTION_LABELS), 1.0 / len(EMOTION_LABELS))

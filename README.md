@@ -474,8 +474,9 @@ Options:
 
 ```bash
 python -m scripts.recognize --camera 1                    # force a specific camera index
-python -m scripts.recognize --external-camera           # prefer camera 2; fall back to PC camera
+python -m scripts.recognize --external-camera           # auto-select external/PC stream and orientation
 python -m scripts.recognize --external-camera --lock-face
+python -m scripts.recognize --external-camera --target-name "Kabanda Jordan" --lock-face
 python -m scripts.recognize --threshold 0.5
 python -m scripts.recognize --skip 5 --det-size 480       # faster labels on a low-end CPU
 python -m scripts.recognize --res 1280x720                # higher-resolution feed
@@ -486,11 +487,18 @@ python -m scripts.recognize --expressions-only           # no identity enrollmen
 python -m scripts.recognize --expressions-only --lock-face
 ```
 
-`--external-camera` is a preference, not a hard-coded device requirement: it
-opens camera 2 first (with the required 90° rotation), then automatically tries
-the PC camera indices when the USB camera is unplugged. The selected camera and
-rotation are printed at startup. To force the built-in PC camera instead, use
-`--camera 0` and omit `--external-camera`.
+`--external-camera` is a preference, not a hard-coded device requirement. In
+this project, logical `--camera 0` is the built-in PC camera and logical
+`--camera 1` is the external camera (usually physical `/dev/video2`). On Linux
+the app opens the external V4L2 device directly, probes alternate USB video
+nodes and all four rotations, then falls back to the PC camera when needed. The
+selected device and rotation are printed at startup.
+
+To target a specific enrolled person, put photos in
+`data/faces/kabanda_jordan/`, run `python -m scripts.enroll`, then use
+`--target-name "Kabanda Jordan"`. The overlay will show `searching: Kabanda
+Jordan`, `lost: Kabanda Jordan`, and then the recognized name instead of
+`Unknown`.
 
 The overlay includes both identity and expression, for example
 `alice 0.91 | Smile 0.84`. The worker uses the newest camera frame only once
@@ -559,6 +567,7 @@ the code.
 | embedding strategy               | `FR_STRATEGY`           | `all`       | `all` = keep every embedding, `mean` = one averaged embedding per person |
 | matching threshold               | `FR_THRESHOLD`          | `0.40`      | Known/Unknown boundary (see §8) |
 | expression reporting threshold   | `FR_EXPRESSION_CONFIDENCE` | `0.40`    | minimum FER+ confidence for a label |
+| anger reporting threshold        | `FR_EXPRESSION_ANGER_THRESHOLD` | `0.25` | lower dedicated threshold for a top-scoring anger class |
 | mouth-open threshold             | `FR_EXPRESSION_MOUTH_OPEN_THRESHOLD` | `0.45` | visual cue used to promote smile to laugh |
 | happy updates for laugh          | `FR_EXPRESSION_LAUGH_FRAMES` | `3`     | temporal stability for a visual laugh |
 | disable expressions              | `FR_EXPRESSIONS`        | `1`         | set to `0` to keep identity-only mode |
@@ -601,6 +610,7 @@ FR_THRESHOLD=0.5 python -m scripts.recognize_image --image photo.jpg
 | `--expressions-only` | off | run expressions without an identity gallery     |
 | `--expression-model PATH` | `models/emotion-ferplus-8.onnx` | local FER+ model path                |
 | `--expression-threshold F` | `0.40` | minimum expression confidence             |
+| `--anger-threshold F` | `0.25` | minimum top-class anger confidence        |
 | `--mouth-open-threshold F` | `0.45` | visual laugh threshold                    |
 | `--laugh-frames N` | `3` | happy updates before a visual laugh       |
 | `--save PATH`   | *(none)*| write an annotated copy                         |
@@ -613,9 +623,11 @@ Streams the webcam and draws a box + label on every face.
 
 | flag            | default  | meaning                                              |
 |-----------------|----------|------------------------------------------------------|
-| `--camera N`    | `0`      | preferred webcam device index                        |
-| `--external-camera` | off  | prefer camera 2 and rotate 90°; fall back to a PC camera automatically |
-| `--rotate DEG`  | `0`      | rotate frames before detection (external camera 2 defaults to 90°; PC fallback to 0°) |
+| `--camera N`    | `0`      | logical camera: `0` = PC camera, `1` = external camera |
+| `--external-camera` | off  | auto-select external/PC stream and orientation        |
+| `--rotate DEG`  | `0`      | override auto orientation                            |
+| `--preview-scale F` | `0.75` external | display-only window scale                    |
+| `--target-name NAME` | off | lock only this enrolled identity                     |
 | `--no-landmarks` | off     | hide face-part squares and movement trails          |
 | `--motion-threshold F` | `0.035` | normalized landmark movement for `MOVING`       |
 | `--threshold F` | `0.40`   | Known/Unknown boundary                               |
@@ -623,6 +635,7 @@ Streams the webcam and draws a box + label on every face.
 | `--expressions-only` | off  | run without an enrolled identity gallery            |
 | `--expression-model PATH` | `models/emotion-ferplus-8.onnx` | local FER+ model path          |
 | `--expression-threshold F` | `0.40` | minimum expression confidence                     |
+| `--anger-threshold F` | `0.25` | minimum top-class anger confidence                |
 | `--mouth-open-threshold F` | `0.45` | visual laugh threshold                            |
 | `--laugh-frames N` | `3`    | happy updates before a visual laugh                  |
 | `--lock-face`    | off     | lock to the largest visible face and track it        |

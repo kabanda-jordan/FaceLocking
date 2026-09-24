@@ -189,6 +189,7 @@ def expression_from_probabilities(
     mouth_open_score: float = 0.0,
     happy_streak: int = 0,
     confidence_threshold: float = 0.40,
+    anger_threshold: Optional[float] = None,
     mouth_open_threshold: float = 0.45,
     laugh_frames: int = 3,
 ) -> "ExpressionResult":
@@ -199,7 +200,7 @@ def expression_from_probabilities(
     * high ``happiness`` -> ``smile``;
     * high ``happiness`` + an open-looking mouth or a sustained happy streak
       -> ``laugh``;
-    * high ``anger`` -> ``angry``;
+    * top-scoring ``anger`` above ``anger_threshold`` -> ``angry``;
     * low-confidence output -> ``uncertain``.
 
     The raw model emotion is retained in the returned result for diagnostics.
@@ -211,11 +212,21 @@ def expression_from_probabilities(
     anger = float(probs[4])
     mouth_open_score = _clamp01(mouth_open_score)
     confidence_threshold = _clamp01(confidence_threshold)
+    if anger_threshold is None:
+        anger_threshold = confidence_threshold
+    anger_threshold = _clamp01(anger_threshold)
     mouth_open_threshold = _clamp01(mouth_open_threshold)
     laugh_frames = max(1, int(laugh_frames))
     happy_streak = max(0, int(happy_streak))
 
-    if anger >= confidence_threshold and anger >= happiness:
+    # FER+ often ranks anger just below neutral on dark webcam frames.  Keep
+    # the dedicated threshold lower than the general expression threshold, but
+    # require anger to be the model's winning class to avoid false positives.
+    if (
+        raw_emotion == "anger"
+        and anger >= anger_threshold
+        and anger >= happiness
+    ):
         label = "angry"
         confidence = anger
     elif happiness >= confidence_threshold:
@@ -326,6 +337,7 @@ class ExpressionClassifier:
         model_path: str,
         input_size: Tuple[int, int] = (64, 64),
         confidence_threshold: float = 0.40,
+        anger_threshold: Optional[float] = None,
         mouth_open_threshold: float = 0.45,
         laugh_frames: int = 3,
         providers: Optional[List[str]] = None,
@@ -347,6 +359,9 @@ class ExpressionClassifier:
 
         self.model_path = model_path
         self.confidence_threshold = _clamp01(confidence_threshold)
+        self.anger_threshold = _clamp01(
+            confidence_threshold if anger_threshold is None else anger_threshold
+        )
         self.mouth_open_threshold = _clamp01(mouth_open_threshold)
         self.laugh_frames = max(1, int(laugh_frames))
         self.session = ort.InferenceSession(
@@ -459,6 +474,7 @@ class ExpressionClassifier:
             mouth_open_score=mouth_open_score,
             happy_streak=happy_streak,
             confidence_threshold=self.confidence_threshold,
+            anger_threshold=self.anger_threshold,
             mouth_open_threshold=self.mouth_open_threshold,
             laugh_frames=self.laugh_frames,
         )

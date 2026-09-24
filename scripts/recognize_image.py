@@ -24,6 +24,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.config import (                                  # noqa: E402
     EXPRESSION_CONFIDENCE,
+    EXPRESSION_ANGER_THRESHOLD,
     EXPRESSION_INPUT_SIZE,
     EXPRESSION_LAUGH_FRAMES,
     EXPRESSION_MODEL_PATH,
@@ -60,6 +61,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--expression-threshold", type=float, default=EXPRESSION_CONFIDENCE,
         help="minimum FER+ confidence before an expression is reported",
+    )
+    parser.add_argument(
+        "--anger-threshold", type=float, default=EXPRESSION_ANGER_THRESHOLD,
+        help="minimum top-class FER+ anger confidence (default: 0.25)",
     )
     parser.add_argument(
         "--mouth-open-threshold", type=float,
@@ -101,6 +106,7 @@ def main() -> int:
                 model_path=args.expression_model,
                 input_size=EXPRESSION_INPUT_SIZE,
                 confidence_threshold=args.expression_threshold,
+                anger_threshold=args.anger_threshold,
                 mouth_open_threshold=args.mouth_open_threshold,
                 laugh_frames=args.laugh_frames,
             )

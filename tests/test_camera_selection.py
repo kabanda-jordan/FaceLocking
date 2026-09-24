@@ -10,6 +10,13 @@ def test_external_preference_wraps_to_pc_indices():
     assert recognize._camera_candidates(0, max_tries=4) == [0, 1, 2, 3]
 
 
+def test_logical_camera_one_is_external_and_zero_is_pc():
+    assert recognize._camera_sources(0, device_paths=False) == [(0, 0), (1, 1)]
+    assert recognize._camera_sources(
+        1, external=True, device_paths=False
+    ) == [(1, 1), (0, 0), (2, 2), (3, 3)]
+
+
 def test_open_usable_camera_falls_back_when_preferred_is_missing(monkeypatch):
     opened = []
 
@@ -35,8 +42,9 @@ def test_open_usable_camera_falls_back_when_preferred_is_missing(monkeypatch):
             self.released = True
 
     monkeypatch.setattr(recognize.cv2, "VideoCapture", FakeCapture)
-    capture, index = recognize.open_usable_camera(2, max_tries=4)
+    capture, index, rotation = recognize.open_usable_camera(2, max_tries=4)
 
     assert index == 0
+    assert rotation == 0
     assert capture is not None
     assert opened[:2] == [2, 0]

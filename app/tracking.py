@@ -10,10 +10,18 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass, field
+import re
 import time
 from typing import Deque, Dict, List, Optional, Sequence
 
 import numpy as np
+
+
+def _normalise_identity(value: object) -> str:
+    """Normalize an enrollment folder/name for user-friendly target matching."""
+    if value is None:
+        return ""
+    return re.sub(r"[_\s]+", " ", str(value).strip()).casefold()
 
 
 def _box(result: object) -> np.ndarray:
@@ -47,11 +55,13 @@ def _iou(first: np.ndarray, second: np.ndarray) -> float:
 class FaceLock:
     """Lock the live overlay to one face and follow it across frames.
 
-    ``filter(results)`` returns all results while disabled.  When enabled it
+    ``filter(results)`` returns all results while disabled. When enabled it
     first chooses the largest visible face, then returns only the result that
-    best matches the locked box.  If the target disappears, the lock enters a
-    short search state instead of silently switching to a different person.
-    The caller can use ``toggle`` to turn locking on/off interactively.
+    best matches the locked box. If ``target_identity`` is provided, only that
+    enrolled identity can be acquired or tracked. If the target disappears,
+    the lock enters a short search state instead of silently switching to a
+    different person. The caller can use ``toggle`` to turn locking on/off
+    interactively.
     """
 
     def __init__(
@@ -59,10 +69,14 @@ class FaceLock:
         iou_threshold: float = 0.20,
         center_threshold: float = 0.45,
         max_misses: int = 12,
+        target_identity: Optional[str] = None,
     ) -> None:
         self.iou_threshold = float(np.clip(iou_threshold, 0.0, 1.0))
         self.center_threshold = float(np.clip(center_threshold, 0.0, 2.0))
         self.max_misses = max(1, int(max_misses))
+        self.target_identity = (
+            _normalise_identity(target_identity) if target_identity else None
+        )
         self.enabled = False
         self.locked = False
         self.bbox: Optional[np.ndarray] = None
@@ -72,7 +86,9 @@ class FaceLock:
     def status(self) -> str:
         if not self.enabled:
             return "off"
-        return "on" if self.locked else "searching"
+        if not self.locked:
+            return "searching"
+        return "lost" if self.misses > 0 else "on"
 
     def reset(self) -> None:
         self.locked = False
@@ -97,8 +113,19 @@ class FaceLock:
             self.enable(results)
         return self.enabled
 
+    def _matches_target(self, result: object) -> bool:
+        if self.target_identity is None:
+            return True
+        match = getattr(result, "match", None)
+        identity = getattr(match, "identity", None)
+        return _normalise_identity(identity) == self.target_identity
+
     def _acquire(self, results: Sequence[object]) -> Optional[object]:
-        candidates = [result for result in results if _area(_box(result)) > 0.0]
+        candidates = [
+            result
+            for result in results
+            if _area(_box(result)) > 0.0 and self._matches_target(result)
+        ]
         if not candidates:
             return None
         # The largest box is a sensible default when several people are in
@@ -122,6 +149,8 @@ class FaceLock:
         best_result = None
         best_score = -1.0
         for result in results:
+            if not self._matches_target(result):
+                continue
             candidate = _box(result)
             overlap = _iou(target, candidate)
             distance = float(np.linalg.norm(_center(candidate) - target_center))

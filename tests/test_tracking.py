@@ -57,6 +57,25 @@ def test_lock_enters_search_state_when_target_disappears():
     assert lock.filter([new_face]) == [new_face]
 
 
+def test_target_identity_selects_kabanda_and_ignores_other_faces():
+    lock = FaceLock(target_identity="Kabanda Jordan")
+    kabanda = face(0, 0)
+    kabanda.match = SimpleNamespace(identity="kabanda_jordan")
+    other = face(200, 0)
+    other.match = SimpleNamespace(identity="Another Person")
+
+    lock.enable([other, kabanda])
+    assert lock.filter([other, kabanda]) == [kabanda]
+    assert lock.status == "on"
+
+
+def test_lock_reports_lost_while_target_is_temporarily_missing():
+    lock = FaceLock(max_misses=3)
+    lock.enable([face(0, 0)])
+    assert lock.filter([]) == []
+    assert lock.status == "lost"
+
+
 def test_toggle_turns_lock_off():
     lock = FaceLock()
     target = face(0, 0)
