@@ -322,7 +322,7 @@ def open_usable_camera(
                 continue
             score = _camera_frame_score(frame, face_detector)
             candidate = (score, reported_index, source)
-            if external and reported_index != 0:
+            if auto_rotate and reported_index != 0:
                 if external_best is None or score[:2] > external_best[0][:2]:
                     external_best = candidate
             elif pc_best is None or score[:2] > pc_best[0][:2]:
