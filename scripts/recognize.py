@@ -144,6 +144,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--target-name", default=None,
         help="lock only this enrolled identity, e.g. 'Kabanda Jordan'",
     )
+    parser.add_argument(
+        "--only-me", action="store_true",
+        help="shortcut for --target-name 'Kabanda Jordan'",
+    )
     return parser
 
 
@@ -693,6 +697,8 @@ def main() -> int:
         args.external_camera = True
     if args.external_camera:
         args.camera = 1
+    if args.only_me and not args.target_name:
+        args.target_name = "Kabanda Jordan"
     if args.target_name:
         args.lock_face = True
         if args.expressions_only:
