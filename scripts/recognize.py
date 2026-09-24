@@ -129,6 +129,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="show a portrait-shaped window with letterboxing (do not rotate the face)",
     )
     parser.add_argument(
+        "--landscape", action="store_true",
+        help="force the displayed frame to landscape orientation",
+    )
+    parser.add_argument(
         "--rotate", type=int, choices=(0, 90, 180, 270), default=None,
         help="override the auto-detected camera rotation (0, 90, 180, or 270)",
     )
@@ -736,6 +740,9 @@ def main() -> int:
     if not 0.1 <= args.preview_scale <= 1.0:
         print("ERROR: --preview-scale must be between 0.1 and 1.0.", file=sys.stderr)
         return 1
+    if args.landscape and args.portrait:
+        print("ERROR: choose only one of --landscape or --portrait.", file=sys.stderr)
+        return 1
 
     if args.no_expressions and args.expressions_only:
         print(
@@ -847,7 +854,7 @@ def main() -> int:
         return 1
 
     if args.rotate is None:
-        if args.external_camera:
+        if args.external_camera and not args.landscape:
             # Probe the stream orientation when possible. This handles both
             # portrait external cameras and already-upright alternate UVC nodes.
             args.rotate = detected_rotation
@@ -921,6 +928,8 @@ def main() -> int:
                 break
 
             frame = _rotate_frame(frame, args.rotate)
+            if args.landscape and frame.shape[0] > frame.shape[1]:
+                frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
             state.publish_frame(frame)
             _, results = state.snapshot()
             display_results = face_lock.filter(results)
