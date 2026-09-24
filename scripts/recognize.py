@@ -214,6 +214,11 @@ def _draw(
     thickness = 3 if locked else 2
     cv2.rectangle(annotated, (x1, y1), (x2, y2), color, thickness)
 
+    # Scale the five part markers with the face size.  The old fixed 8 px
+    # squares were easy to miss on a 640x480 preview, especially when the
+    # camera was held farther away.
+    marker_half = int(np.clip(round(max(1, x2 - x1) * 0.035), 5, 14))
+
     identity_label = result.match.display_label
     if locked:
         identity_label = f"LOCK {identity_label}"
@@ -255,15 +260,28 @@ def _draw(
         )
         for part, ((px, py), part_color) in enumerate(zip(points, _LANDMARK_COLORS)):
             ix, iy = int(px), int(py)
-            # Filled square + outline makes the five face parts easy to see.
-            cv2.rectangle(annotated, (ix - 4, iy - 4), (ix + 4, iy + 4), (0, 0, 0), -1)
-            cv2.rectangle(annotated, (ix - 4, iy - 4), (ix + 4, iy + 4), part_color, 2)
+            # Filled square + bright outline makes the five face parts easy
+            # to see even on a small preview window.
+            cv2.rectangle(
+                annotated,
+                (ix - marker_half, iy - marker_half),
+                (ix + marker_half, iy + marker_half),
+                (0, 0, 0),
+                -1,
+            )
+            cv2.rectangle(
+                annotated,
+                (ix - marker_half, iy - marker_half),
+                (ix + marker_half, iy + marker_half),
+                part_color,
+                2,
+            )
             cv2.putText(
                 annotated,
                 _LANDMARK_LABELS[part],
-                (ix + 6, iy - 5),
+                (ix + marker_half + 2, iy - marker_half - 3),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.35,
+                0.4,
                 part_color,
                 1,
                 cv2.LINE_AA,
@@ -346,6 +364,42 @@ def _labeled_frame(
             show_landmarks=show_landmarks,
         )
     return annotated
+
+
+def _draw_face_guide(annotated: np.ndarray, lock_status: str) -> None:
+    """Show an actionable framing guide while no face is selected.
+
+    A dark/backlit or side-facing frame cannot produce trustworthy landmarks.
+    Making the failure visible is more useful than silently showing an empty
+    video, and the guide disappears as soon as the detector acquires a face.
+    """
+    height, width = annotated.shape[:2]
+    if height < 120 or width < 160:
+        return
+
+    guide_width = max(140, min(width - 40, int(width * 0.46)))
+    guide_height = max(180, min(height - 110, int(height * 0.62)))
+    left = max(20, (width - guide_width) // 2)
+    top = max(52, (height - guide_height) // 2)
+    right = min(width - 20, left + guide_width)
+    bottom = min(height - 82, top + guide_height)
+
+    guide_color = (0, 210, 255)
+    cv2.rectangle(annotated, (left, top), (right, bottom), guide_color, 2)
+    cv2.line(annotated, ((left + right) // 2, top), ((left + right) // 2, bottom),
+             (0, 210, 255), 1, cv2.LINE_AA)
+    cv2.line(annotated, (left, (top + bottom) // 2), (right, (top + bottom) // 2),
+             (0, 210, 255), 1, cv2.LINE_AA)
+
+    message = "NO FACE DETECTED"
+    detail = "CENTER YOUR FACE AND LOOK AT THE CAMERA"
+    if lock_status == "searching":
+        detail = "PRESS L TO UNLOCK - THEN CENTER YOUR FACE"
+    cv2.rectangle(annotated, (0, height - 72), (width, height), (18, 18, 18), -1)
+    cv2.putText(annotated, message, (16, height - 46),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 210, 255), 2, cv2.LINE_AA)
+    cv2.putText(annotated, detail, (16, height - 18),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.45, (240, 240, 240), 1, cv2.LINE_AA)
 
 
 class _SharedState:
@@ -593,6 +647,8 @@ def main() -> int:
                 motion_states=motion_states,
                 show_landmarks=not args.no_landmarks,
             )
+            if not display_results:
+                _draw_face_guide(annotated, face_lock.status)
 
             # display-rate counter so you can SEE the video is not slowed down
             fps_times.append(t0)

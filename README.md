@@ -490,7 +490,10 @@ The overlay includes both identity and expression, for example
 `alice 0.91 | Smile 0.84`. The worker uses the newest camera frame only once
 and applies a small per-face temporal filter, so a held frame is not counted
 multiple times while a `laugh` label is being stabilized. Press `l` to toggle
-face lock; the status bar shows `face lock: on`, `searching`, or `off`.
+face lock; the status bar shows `face lock: on`, `searching`, or `off`. If no
+face is detected, the window shows a centering guide; start with lock off while
+positioning yourself, then press `l` once the face box and five landmark squares
+are visible.
 
 **How fast will the video run?** On a normal webcam the hardware caps the
 stream at **~30 FPS** (60 FPS only on cameras that explicitly support it —
