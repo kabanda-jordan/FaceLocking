@@ -125,6 +125,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="display-only window scale (external camera default: 0.75)",
     )
     parser.add_argument(
+        "--portrait", action="store_true",
+        help="show a portrait-shaped window with letterboxing (do not rotate the face)",
+    )
+    parser.add_argument(
         "--rotate", type=int, choices=(0, 90, 180, 270), default=0,
         help="override the auto-detected camera rotation (0, 90, 180, or 270)",
     )
@@ -173,6 +177,25 @@ def _rotate_frame(frame: np.ndarray, degrees: int) -> np.ndarray:
     if degrees == 270:
         return cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
     return frame
+
+
+def _portrait_display(frame: np.ndarray) -> np.ndarray:
+    """Fit a landscape frame into a portrait canvas without rotating the face."""
+    height, width = frame.shape[:2]
+    if height >= width:
+        return frame
+    target_height, target_width = width, height
+    scale = min(target_width / float(width), target_height / float(height))
+    resized = cv2.resize(
+        frame,
+        (max(1, int(round(width * scale))), max(1, int(round(height * scale)))),
+        interpolation=cv2.INTER_AREA,
+    )
+    canvas = np.zeros((target_height, target_width, 3), dtype=frame.dtype)
+    top = max(0, (target_height - resized.shape[0]) // 2)
+    left = max(0, (target_width - resized.shape[1]) // 2)
+    canvas[top:top + resized.shape[0], left:left + resized.shape[1]] = resized
+    return canvas
 
 
 def _camera_candidates(preferred: int, max_tries: int = 4):
@@ -935,6 +958,8 @@ def main() -> int:
                 target_name=args.target_name,
             )
             display_frame = annotated
+            if args.portrait:
+                display_frame = _portrait_display(display_frame)
             if abs(args.preview_scale - 1.0) > 1e-6:
                 display_frame = cv2.resize(
                     annotated,

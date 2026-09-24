@@ -478,6 +478,7 @@ python -m scripts.recognize --external-camera           # auto-select external/P
 python -m scripts.recognize --external-camera --lock-face
 python -m scripts.recognize --external-camera --target-name "Kabanda Jordan" --lock-face
 python -m scripts.recognize --external-camera --only-me --lock-face
+python -m scripts.recognize --camera 1 --only-me --portrait --skip 2
 python -m scripts.recognize --threshold 0.5
 python -m scripts.recognize --skip 5 --det-size 480       # faster labels on a low-end CPU
 python -m scripts.recognize --res 1280x720                # higher-resolution feed
@@ -628,6 +629,7 @@ Streams the webcam and draws a box + label on every face.
 | `--external-camera` | off  | auto-select external/PC stream and orientation        |
 | `--rotate DEG`  | `0`      | override auto orientation                            |
 | `--preview-scale F` | `0.75` external | display-only window scale                    |
+| `--portrait` | off | show a portrait-shaped window without rotating the face |
 | `--target-name NAME` | off | lock only this enrolled identity                     |
 | `--only-me` | off | shortcut for `--target-name "Kabanda Jordan"`        |
 | `--no-landmarks` | off     | hide face-part squares and movement trails          |
