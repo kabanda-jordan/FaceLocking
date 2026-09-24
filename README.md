@@ -1,11 +1,12 @@
-# face-recognition
+# face-rec-locking
 
 A complete, runnable **face-recognition system** built for a Computer Science
 practical. It detects faces in photos or from a **live webcam**, aligns them,
 converts them into **512-dimensional numerical embeddings** using the
 **ArcFace** deep-learning model (running locally as an ONNX model — no cloud,
 no API key, no internet), and **recognises people** by matching their embedding
-against a small local enrolment database.
+against a small local enrolment database. It also runs a local FER+ model to
+estimate **smile**, **laugh**, and **angry** from the same aligned face crop.
 
 Everything runs on a normal CPU with plain Python. Every single stage of the
 pipeline is explicit, inspectable and testable — nothing is hidden inside a
@@ -51,6 +52,16 @@ extend.
   stored as `embeddings.npz` + `meta.json`.
 - **Matching by cosine similarity** — compare a new face to every enrolled
   face and decide **Known** / **Unknown** using a configurable threshold.
+- **Local expression detection** — a FER+ ONNX model runs on the same aligned
+  face crop and reports `smile`, `laugh`, or `angry` (plus the other native
+  FER+ categories). A light temporal filter reduces flicker on webcam frames.
+  `laugh` is a visual estimate (open/sustained happiness), not microphone-
+  confirmed laughter.
+- **One-face camera lock** — start with `--lock-face`, or press `l` in the live
+  window, to keep the overlay on one selected face and ignore other detections.
+- **Face-part markers and motion** — the live window marks both eyes, nose, and
+  mouth corners with colored squares, draws short movement trails, and reports
+  `STILL` or `MOVING` from landmark displacement.
 - **Three runnable tools**:
   - recognise a single photo (`scripts/recognize_image.py`),
   - recognise live from a **webcam** (`scripts/recognize.py`),
@@ -59,7 +70,8 @@ extend.
 - From the live webcam window you can **save a photo** (`s` key) or
   **start/stop recording an MP4** (`r` key) straight into your Downloads
   folder.
-- **25 passing unit tests** (no models required).
+- **46 model-free unit tests** plus optional FER+ model-backed checks
+  (model-backed tests skip when files are absent).
 - Everything **runs on CPU** with pure `pip` — works on any simple laptop.
 
 ---
@@ -108,7 +120,15 @@ A face flows through the chain from left to right:
                                          ▼
                  ┌───────────────────────▼────────────────────────┐
                  │                                                │
-                 │  4. ENROLLMENT   (run once per person)         │
+                 │  4. EXPRESSION  FER+ ONNX (64×64 grayscale)    │
+                 │   Classifies locally: happiness / anger.       │
+                 │   Maps to smile/laugh/angry (visual).          │
+                 └───────────────────────┬────────────────────────┘
+                                          │  labelled expression
+                                          ▼
+                 ┌───────────────────────▼────────────────────────┐
+                 │                                                │
+                 │  5. ENROLLMENT   (run once per person)         │
                  │                                                │
                  │   Each enrolment photo is embedded with steps  │
                  │   1-3 and stored: embeddings.npz + meta.json   │
@@ -117,14 +137,14 @@ A face flows through the chain from left to right:
                                          ▼
                  ┌───────────────────────▼────────────────────────┐
                  │                                                │
-                 │  5. MATCHING  cosine similarity + threshold    │
+                 │  6. MATCHING  cosine similarity + threshold    │
                  │                                                │
                  │   New face  vs  every enrolled face.           │
                  │   best score ≥ threshold  →  "Known: <name>"   │
                  │   best score <  threshold  →  "Unknown"        │
                  └───────────────────────┬────────────────────────┘
                                          ▼
-                                  DECISION + annotated image
+                                  IDENTITY + EXPRESSION + ANNOTATED IMAGE
 ```
 
 ### 2.1 Why alignment matters so much
@@ -194,12 +214,14 @@ face-recognition/
 │   ├── detector.py             # stage 1 — SCRFD face detector (ONNX)
 │   ├── aligner.py              # stage 2 — 5-point similarity-transform alignment
 │   ├── embedder.py             # stage 3 — ArcFace embedding (ONNX)
+│   ├── expression.py           # FER+ expression labels + temporal smoothing
+│   ├── tracking.py             # one-face lock for the live camera overlay
 │   ├── enrollment.py           # stage 4 — build / save / load the embedding DB
 │   ├── matcher.py              # stage 5 — cosine similarity + threshold decision
-│   └── recognition.py          # the pipeline that wires stages 1–5 together
+│   └── recognition.py          # the pipeline that wires all stages together
 │
 ├── scripts/                    # command-line tools you run from the terminal
-│   ├── download_models.py      # downloads the two ONNX models (~180 MB)
+│   ├── download_models.py      # downloads the three ONNX models (~215 MB)
 │   ├── enroll.py               # enrol all photos in data/faces/
 │   ├── recognize.py            # live webcam recognition
 │   ├── recognize_image.py      # recognise one photo
@@ -217,7 +239,8 @@ face-recognition/
 │
 ├── models/                     # ONNX models (downloaded, git-ignored)
 │   ├── det_10g.onnx            # SCRFD detector
-│   └── w600k_r50.onnx          # ArcFace recognition model
+│   ├── w600k_r50.onnx          # ArcFace recognition model
+│   └── emotion-ferplus-8.onnx  # FER+ expression model
 │
 ├── outputs/                    # annotated results saved by the tools (git-ignored)
 ├── requirements.txt            # everything you need to `pip install`
@@ -290,16 +313,18 @@ Everything is CPU-only and pure pip — no special system installs.
 python -m scripts.download_models
 ```
 
-This downloads the official **InsightFace v0.7** pack `buffalo_l.zip`
-(~180 MB) and extracts the two files into `models/`:
+This downloads the two InsightFace identity ONNX files (using a CDN mirror
+of the official `buffalo_l` package, with the official archive as fallback),
+and downloads the FER+ expression model from the ONNX Model Zoo:
 
-| file             | size   | model      | role                               |
-|------------------|--------|------------|------------------------------------|
-| `det_10g.onnx`   | ~16 MB | **SCRFD**  | face detection + 5 landmarks       |
-| `w600k_r50.onnx` | ~166 MB| **ArcFace**| face → 512-d embedding             |
+| file                         | size    | model      | role                               |
+|------------------------------|---------|------------|------------------------------------|
+| `det_10g.onnx`               | ~16 MB  | **SCRFD**  | face detection + 5 landmarks       |
+| `w600k_r50.onnx`             | ~166 MB | **ArcFace**| face → 512-d embedding             |
+| `emotion-ferplus-8.onnx`     | ~35 MB  | **FER+**   | expression probabilities           |
 
 If the download is interrupted, just run the command again — it **resumes** a
-partial download. When it finishes you should see the two files:
+partial download. When it finishes you should see the three files:
 
 ```bash
 dir models            # Windows
@@ -388,6 +413,17 @@ Similarity: 0.1234
   bbox=[407, 421, 994, 1193] det_conf=0.883
 ```
 
+When the expression model is installed, each result also includes a local
+expression line such as:
+
+```
+  expression=Smile 0.87 (raw=happiness, mouth_open=0.18)
+```
+
+`Smile` is a happiness prediction, `Laugh` is happiness with an open-looking
+mouth or a short sustained-happy history, and `Angry` comes from the FER+
+anger class. These are visual estimates; the webcam tool does not use audio.
+
 Useful options for this tool:
 
 ```bash
@@ -402,6 +438,15 @@ python -m scripts.recognize_image --image photo.jpg --json
 
 # test a different threshold for this run only
 python -m scripts.recognize_image --image photo.jpg --threshold 0.5
+
+# tune expression reporting (higher = fewer uncertain labels)
+python -m scripts.recognize_image --image photo.jpg --expression-threshold 0.5
+
+# run identity matching without expression inference
+python -m scripts.recognize_image --image photo.jpg --no-expressions
+
+# detect expressions even if nobody has been enrolled yet
+python -m scripts.recognize_image --image photo.jpg --expressions-only
 ```
 
 ### Step 9 — Recognise live from your webcam
@@ -422,16 +467,30 @@ A window opens showing your webcam feed. Every face gets:
 |------------|------------------------------------------------------------------|
 | `s`        | **save a photo** — writes `fr_capture_<timestamp>.jpg` to your **Downloads** folder |
 | `r`        | **start / stop recording** — writes `fr_video_<timestamp>.mp4` to your **Downloads** folder (a red dot + REC timer appear on screen while recording) |
+| `l`        | **lock / unlock one face** — the largest visible face is selected first; the overlay follows it and ignores other faces |
 | `q` / `ESC`| quit                                                            |
 
 Options:
 
 ```bash
 python -m scripts.recognize --camera 1                    # force a specific camera index
+python -m scripts.recognize --external-camera           # camera 2 + rotate 90
+python -m scripts.recognize --external-camera --lock-face
 python -m scripts.recognize --threshold 0.5
 python -m scripts.recognize --skip 5 --det-size 480       # faster labels on a low-end CPU
 python -m scripts.recognize --res 1280x720                # higher-resolution feed
+python -m scripts.recognize --no-expressions               # identity-only mode
+python -m scripts.recognize --laugh-frames 4              # require 4 happy updates for Laugh
+python -m scripts.recognize --lock-face                   # start locked to the largest face
+python -m scripts.recognize --expressions-only           # no identity enrollment required
+python -m scripts.recognize --expressions-only --lock-face
 ```
+
+The overlay includes both identity and expression, for example
+`alice 0.91 | Smile 0.84`. The worker uses the newest camera frame only once
+and applies a small per-face temporal filter, so a held frame is not counted
+multiple times while a `laugh` label is being stabilized. Press `l` to toggle
+face lock; the status bar shows `face lock: on`, `searching`, or `off`.
 
 **How fast will the video run?** On a normal webcam the hardware caps the
 stream at **~30 FPS** (60 FPS only on cameras that explicitly support it —
@@ -490,6 +549,10 @@ the code.
 | detector NMS IoU cutoff          | `FR_DETECTOR_NMS`       | `0.4`       | overlap threshold for duplicate boxes  |
 | embedding strategy               | `FR_STRATEGY`           | `all`       | `all` = keep every embedding, `mean` = one averaged embedding per person |
 | matching threshold               | `FR_THRESHOLD`          | `0.40`      | Known/Unknown boundary (see §8) |
+| expression reporting threshold   | `FR_EXPRESSION_CONFIDENCE` | `0.40`    | minimum FER+ confidence for a label |
+| mouth-open threshold             | `FR_EXPRESSION_MOUTH_OPEN_THRESHOLD` | `0.45` | visual cue used to promote smile to laugh |
+| happy updates for laugh          | `FR_EXPRESSION_LAUGH_FRAMES` | `3`     | temporal stability for a visual laugh |
+| disable expressions              | `FR_EXPRESSIONS`        | `1`         | set to `0` to keep identity-only mode |
 | ONNX threads (speed)             | `FR_ONNX_THREADS`       | `2`         | intra-op threads for the ONNX models; `2` is fastest on most laptops (default all-cores measured ~6× slower), raise it on beefy desktops |
 
 Example:
@@ -525,6 +588,12 @@ FR_THRESHOLD=0.5 python -m scripts.recognize_image --image photo.jpg
 |-----------------|---------|--------------------------------------------------|
 | `--image PATH`  | *(required)* | photo to analyse                            |
 | `--threshold F` | `0.40`  | Known/Unknown boundary (matches config default)  |
+| `--no-expressions` | off | skip FER+ expression inference                 |
+| `--expressions-only` | off | run expressions without an identity gallery     |
+| `--expression-model PATH` | `models/emotion-ferplus-8.onnx` | local FER+ model path                |
+| `--expression-threshold F` | `0.40` | minimum expression confidence             |
+| `--mouth-open-threshold F` | `0.45` | visual laugh threshold                    |
+| `--laugh-frames N` | `3` | happy updates before a visual laugh       |
 | `--save PATH`   | *(none)*| write an annotated copy                         |
 | `--json`        | off     | print results as JSON                            |
 | `--show`        | off     | pop up a window with the annotated result        |
@@ -536,7 +605,18 @@ Streams the webcam and draws a box + label on every face.
 | flag            | default  | meaning                                              |
 |-----------------|----------|------------------------------------------------------|
 | `--camera N`    | `0`      | preferred webcam device index                        |
+| `--external-camera` | off  | use camera 2 and rotate 90° automatically          |
+| `--rotate DEG`  | `0`      | rotate frames before detection (`90` for a sideways external camera) |
+| `--no-landmarks` | off     | hide face-part squares and movement trails          |
+| `--motion-threshold F` | `0.035` | normalized landmark movement for `MOVING`       |
 | `--threshold F` | `0.40`   | Known/Unknown boundary                               |
+| `--no-expressions` | off  | skip FER+ expression inference                      |
+| `--expressions-only` | off  | run without an enrolled identity gallery            |
+| `--expression-model PATH` | `models/emotion-ferplus-8.onnx` | local FER+ model path          |
+| `--expression-threshold F` | `0.40` | minimum expression confidence                     |
+| `--mouth-open-threshold F` | `0.45` | visual laugh threshold                            |
+| `--laugh-frames N` | `3`    | happy updates before a visual laugh                  |
+| `--lock-face`    | off     | lock to the largest visible face and track it        |
 | `--skip N`      | `3`      | worker runs recognition once every N frames (video always runs at the camera's max FPS) |
 | `--det-size W`  | `640`    | square resolution fed to the SCRFD detector (smaller = faster) |
 | `--res WxH`     | `640x480`| camera resolution (smaller = higher FPS)              |
@@ -630,10 +710,10 @@ python -m pytest tests -q
 Result:
 
 ```
-25 passed in 8.56s
+46 passed (+2 when the FER+ model is installed)
 ```
 
-What the 25 tests actually verify (see `tests/`):
+What the tests verify (see `tests/`):
 
 - **Alignment** (5 tests) — the warp produces a 112×112 image; the identity
   transform is used when the landmarks already match the reference; realistic
@@ -647,7 +727,16 @@ What the 25 tests actually verify (see `tests/`):
   zero-vector edge case), cosine similarity (identical/orthogonal/opposite
   vectors, = the normalized dot product, "more similar &gt; less similar"),
   and the threshold decision rule (above → Known, exactly at the boundary →
-  Known, below → Unknown, empty database → error, threshold is configurable).
+  Known, below → Unknown, empty database → error, threshold is configurable);
+- **Expressions** (11 model-free tests) — FER+ probability normalisation,
+  smile/laugh/angry mapping, low-confidence handling, JSON-safe results, and
+  temporal smoothing without loading an ONNX file;
+- **Face lock** (5 tests) — selecting the largest face, following a moved box,
+  ignoring other faces, recovering from a missing target, and toggling lock;
+- **Landmark motion** (2 tests) — still/moving transitions, normalized movement,
+  trails, and missing-landmark handling;
+- **Pipeline integration** (3 tests) — identity mode still requires enrollment,
+  while expression-only mode can run without a gallery.
 
 ---
 
@@ -657,6 +746,8 @@ What the 25 tests actually verify (see `tests/`):
 |----------------------------------------------------------------|-----|
 | `pip` says the requirements cannot be found                     | activate the virtual environment first (`Step 2`) |
 | `import onnxruntime` fails                                     | `pip install -r requirements.txt` inside the venv |
+| expression labels are missing                                  | run `python -m scripts.download_models`; confirm `models/emotion-ferplus-8.onnx` exists, or use `--no-expressions` |
+| expression is `uncertain` too often                            | improve lighting/face size, or lower `--expression-threshold` after checking false positives |
 | download hangs / interrupted                                   | run `python -m scripts.download_models` again — it resumes partial downloads |
 | `enrollment database is empty; run python -m scripts.enroll`  | you ran recognition before enrolling; add photos under `data/faces/` and run `Step 7` |
 | "could not find a working webcam"                              | close other apps using the camera; unplug/replug a USB webcam; grant camera permission (Windows Settings → Privacy & security → Camera); try `--camera 1` |
@@ -672,18 +763,24 @@ What the 25 tests actually verify (see `tests/`):
 
 If you want to go further than the practical asks:
 
-1. **Threshold search** — sweep many thresholds and plot false-accept /
+1. **Expression calibration** — collect consented frames from each person,
+   tune `FR_EXPRESSION_CONFIDENCE` and the mouth-open threshold, and report
+   per-person precision/recall rather than assuming one threshold fits all.
+2. **Audio-assisted laugh events** — combine the visual happiness signal with
+   microphone/audio laughter detection if you need to distinguish a visual
+   smile from audible laughter.
+3. **Threshold search** — sweep many thresholds and plot false-accept /
    false-reject rates (an EER curve).
-2. **Anti-spoofing** — blink detection or liveness check before matching.
-3. **Efficiency** — track each face across frames so you embed once per
+4. **Anti-spoofing** — blink detection or liveness check before matching.
+5. **Efficiency** — track each face across frames so you embed once per
    person per appearance, making the webcam tool much faster.
-4. **Representatives** — implement the `mean` strategy and compare its
+6. **Representatives** — implement the `mean` strategy and compare its
    accuracy against `all`.
-5. **Visualisation** — project the 512-d embeddings into 2D with t-SNE/PCA to
+7. **Visualisation** — project the 512-d embeddings into 2D with t-SNE/PCA to
    *see* that the same person clusters together.
-6. **Face clustering** — add an unsupervised mode that groups unlabelled
+8. **Face clustering** — add an unsupervised mode that groups unlabelled
    photos into identities.
-7. **Landmark drawing** — extend `scripts/visualize.py` to draw eyebrows,
+9. **Landmark drawing** — extend `scripts/visualize.py` to draw eyebrows,
    a face mesh or the face image before/after alignment side-by-side.
 
 ---
@@ -703,9 +800,15 @@ If you want to go further than the practical asks:
 
 ## 14. Licence and model credits
 
-- The two ONNX models are the official **InsightFace** models from the
+- The two identity ONNX models are the official **InsightFace** models from the
   `buffalo_l` package (v0.7), distributed by the InsightFace project
-  (MIT licence): <https://github.com/deepinsight/insightface>.
+  (MIT licence): <https://github.com/deepinsight/insightface>. The downloader
+  may use a CDN mirror for the same files and falls back to the official
+  release archive.
+- `emotion-ferplus-8.onnx` is the FER+ model from the ONNX Model Zoo
+  (MIT licence): <https://github.com/onnx/models/tree/main/validated/vision/body_analysis/emotion_ferplus>.
+  It classifies visible expressions locally; `laugh` is derived from visual
+  happiness plus an open/sustained-mouth signal, not audio.
 - Example test faces are public-domain portraits from Wikimedia Commons and
   the ONNX Model Zoo sample images, used only for evaluation.
 - This project's own code is MIT licensed (see `LICENSE`).

@@ -40,6 +40,8 @@ if not os.path.isdir(DOWNLOADS_DIR):
 DETECTOR_MODEL_PATH = os.path.join(MODELS_DIR, "det_10g.onnx")
 # recognizer: ArcFace ResNet-50 (from the official InsightFace buffalo_l package)
 EMBEDDER_MODEL_PATH = os.path.join(MODELS_DIR, "w600k_r50.onnx")
+# expression classifier: FER+ (ONNX Model Zoo, 8 emotion logits)
+EXPRESSION_MODEL_PATH = os.path.join(MODELS_DIR, "emotion-ferplus-8.onnx")
 
 # Size the detector passes into the network (width, height).
 DETECTOR_INPUT_SIZE = tuple(
@@ -54,6 +56,40 @@ DETECTOR_NMS = float(os.environ.get("FR_DETECTOR_NMS", "0.4"))
 EMBEDDER_INPUT_IMAGE_SIZE = (112, 112)
 # Expected embedding length. w600k_r50 produces 512 floats.
 EMBEDDING_DIMENSION = 512
+
+# FER+ expression model settings.  FER+ emits eight probabilities; the
+# wrapper maps happiness to smile/laugh and anger to angry.  A missing model
+# does not stop identity recognition, but expression fields will be None.
+EXPRESSION_INPUT_SIZE = (64, 64)
+EXPRESSION_CONFIDENCE = float(os.environ.get("FR_EXPRESSION_CONFIDENCE", "0.40"))
+EXPRESSION_MOUTH_OPEN_THRESHOLD = float(
+    os.environ.get("FR_EXPRESSION_MOUTH_OPEN_THRESHOLD", "0.45")
+)
+EXPRESSION_LAUGH_FRAMES = int(os.environ.get("FR_EXPRESSION_LAUGH_FRAMES", "3"))
+# The ONNX Model Zoo stores large files through Git LFS.  media.githubusercontent
+# serves the actual binary; the ordinary raw URL returns a small LFS pointer.
+EXPRESSION_MODEL_URL = (
+    "https://media.githubusercontent.com/media/onnx/models/main/"
+    "validated/vision/body_analysis/emotion_ferplus/model/"
+    "emotion-ferplus-8.onnx"
+)
+# Direct ONNX files mirrored from the official InsightFace buffalo_l package.
+# They are much smaller/faster to download than the 289 MB release archive; the
+# downloader still falls back to the official archive if a mirror is unavailable.
+DETECTOR_MODEL_URL = (
+    "https://huggingface.co/DavidHoa/buffalo_l/resolve/main/"
+    "det_10g.onnx?download=true"
+)
+EMBEDDER_MODEL_URL = (
+    "https://huggingface.co/DavidHoa/buffalo_l/resolve/main/"
+    "w600k_r50.onnx?download=true"
+)
+EXPRESSION_ENABLED = os.environ.get("FR_EXPRESSIONS", "1").lower() not in {
+    "0",
+    "false",
+    "no",
+    "off",
+}
 
 # --------------------------------------------------------------------------
 # Enrollment data.

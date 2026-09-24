@@ -79,7 +79,10 @@ def _draw_detection(image: np.ndarray, faces: List[Detection]) -> np.ndarray:
             cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2, cv2.LINE_AA,
         )
         for (px, py), label, color in zip(face.landmarks, LANDMARK_LABELS, LANDMARK_COLORS):
-            cv2.circle(out, (int(px), int(py)), 5, color, -1)
+            cv2.rectangle(
+                out, (int(px) - 4, int(py) - 4), (int(px) + 4, int(py) + 4),
+                color, -1,
+            )
             cv2.putText(
                 out, label, (int(px) + 8, int(py) - 5),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA,
@@ -119,6 +122,8 @@ def _draw_result(image: np.ndarray, results) -> np.ndarray:
         color = (0, 200, 0) if r.match.is_known else (0, 0, 255)
         cv2.rectangle(out, (x1, y1), (x2, y2), color, 2)
         label = r.match.display_label
+        if r.expression is not None:
+            label += f" | {r.expression.display_label}"
         cv2.putText(
             out, label, (x1, max(0, y1 - 8)),
             cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2, cv2.LINE_AA,
@@ -136,6 +141,12 @@ def main() -> int:
     except Exception as exc:
         print(f"SETUP ERROR: {exc}", file=sys.stderr)
         return 1
+    if pipeline.expression_classifier is None:
+        print(
+            "WARNING: expression model is unavailable; showing identity only. "
+            "Run `python -m scripts.download_models`.",
+            file=sys.stderr,
+        )
 
     try:
         from app.utils import load_image_rgb
@@ -167,7 +178,7 @@ def main() -> int:
                      _draw_alignment(r, scale=5)):
             _done()
             return 0
-    if not _show("3. RESULT - identity + cosine similarity", _draw_result(image, results)):
+    if not _show("3. RESULT - identity + expression", _draw_result(image, results)):
         _done()
         return 0
     _done()

@@ -1,4 +1,4 @@
-# Core dependencies for the ArcFace + ONNX face recognition project.
+# Core dependencies for the ArcFace + FER+ ONNX face/expression project.
 #
 # Install all of them with:
 #   pip install -r requirements.txt

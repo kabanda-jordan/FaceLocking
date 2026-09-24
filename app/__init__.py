@@ -7,9 +7,11 @@ This package is split by responsibility:
   aligner.py       5-point similarity-transform alignment -> standardized face
   embedder.py      ArcFace (ONNX) inference -> L2-normalized 512-dim embedding
   matcher.py       cosine-similarity matching against an enrollment database
+  expression.py    local FER+ expression classification + temporal smoothing
+  tracking.py      one-face lock + landmark motion tracking for the live overlay
   enrollment.py    turning raw face photos into stored per-identity embeddings
-  recognition.py   composes detector -> aligner -> embedder -> matcher
+  recognition.py   composes detector -> aligner -> embedder -> matcher -> expression
   utils.py         small shared helpers (normalization, image I/O, ...)
 """
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"

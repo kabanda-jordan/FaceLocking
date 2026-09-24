@@ -3,15 +3,20 @@
 Usage (from the root project folder):
     python -m scripts.recognize
     python -m scripts.recognize --camera 0 --threshold 0.4
+    python -m scripts.recognize --external-camera       # camera 2 + rotate 90
+    python -m scripts.recognize --camera 2 --rotate 90    # equivalent
+    python -m scripts.recognize --lock-face               # track one face
     python -m scripts.recognize --skip 2 --det-size 480   # faster on CPU
 
-Every frame shows each detected face with a box and a label like:
-    Jordan 0.83     (score >= threshold -> Known)
-    Unknown 0.34    (score <  threshold -> Unknown)
+Every frame shows each detected face with a box, five face-part squares,
+motion status, and a label like:
+    Jordan 0.83 | Smile 0.84
+    Unknown 0.34 | Angry 0.71
 
 Window keys:
     s        capture the current frame as a JPEG in your Downloads folder
     r        start / stop recording an MP4 video in your Downloads folder
+    l        lock / unlock the largest visible face
     q / ESC  quit
 
 Performance design
@@ -43,11 +48,24 @@ from app.config import (                            # noqa: E402
     DETECTOR_MODEL_PATH,
     DETECTOR_NMS,
     DOWNLOADS_DIR,
+    EXPRESSION_CONFIDENCE,
+    EXPRESSION_INPUT_SIZE,
+    EXPRESSION_LAUGH_FRAMES,
+    EXPRESSION_MODEL_PATH,
+    EXPRESSION_MOUTH_OPEN_THRESHOLD,
     MATCHING_THRESHOLD,
 )
 from app.detector import SCRFDDetector               # noqa: E402
 from app.enrollment import EnrollmentError           # noqa: E402
+from app.expression import (                         # noqa: E402
+    ExpressionClassifier,
+    ExpressionStabilizer,
+)
 from app.recognition import RecognitionPipeline      # noqa: E402
+from app.tracking import (                           # noqa: E402
+    FaceLock,
+    LandmarkMotionTracker,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -57,8 +75,37 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--camera", type=int, default=0,
                         help="webcam device index (0 = default)")
+    parser.add_argument(
+        "--external-camera", action="store_true",
+        help="use camera 2 and rotate its sideways feed by 90 degrees",
+    )
     parser.add_argument("--threshold", type=float, default=MATCHING_THRESHOLD,
                         help="cosine-similarity threshold for Known/Unknown")
+    parser.add_argument(
+        "--no-expressions", action="store_true",
+        help="skip smile/laugh/angry classification",
+    )
+    parser.add_argument(
+        "--expressions-only", action="store_true",
+        help="run face expressions without requiring enrolled identities",
+    )
+    parser.add_argument(
+        "--expression-model", default=EXPRESSION_MODEL_PATH,
+        help="path to the local FER+ ONNX expression model",
+    )
+    parser.add_argument(
+        "--expression-threshold", type=float, default=EXPRESSION_CONFIDENCE,
+        help="minimum FER+ confidence before an expression is reported",
+    )
+    parser.add_argument(
+        "--mouth-open-threshold", type=float,
+        default=EXPRESSION_MOUTH_OPEN_THRESHOLD,
+        help="visual mouth-open score used to promote smile to laugh",
+    )
+    parser.add_argument(
+        "--laugh-frames", type=int, default=EXPRESSION_LAUGH_FRAMES,
+        help="happy worker updates required for a visual laugh label",
+    )
     parser.add_argument("--skip", type=int, default=3,
                         help="run detection+embedding once every N frames "
                              "(1 = every frame; larger = faster)")
@@ -68,6 +115,22 @@ def build_parser() -> argparse.ArgumentParser:
                              "much faster, e.g. 480 or 416)")
     parser.add_argument("--res", default="640x480",
                         help="camera resolution WxH (e.g. 1280x720)")
+    parser.add_argument(
+        "--rotate", type=int, choices=(0, 90, 180, 270), default=0,
+        help="rotate each camera frame before detection (use 90 for this external camera)",
+    )
+    parser.add_argument(
+        "--no-landmarks", action="store_true",
+        help="hide the five face-part markers and motion trails",
+    )
+    parser.add_argument(
+        "--motion-threshold", type=float, default=0.035,
+        help="normalized landmark movement required for MOVING status",
+    )
+    parser.add_argument(
+        "--lock-face", action="store_true",
+        help="lock the overlay to the largest visible face and track it",
+    )
     return parser
 
 
@@ -82,6 +145,17 @@ def _frame_is_usable(frame: np.ndarray, min_brightness: float = 25.0) -> bool:
     if frame is None:
         return False
     return float(np.mean(frame)) >= min_brightness
+
+
+def _rotate_frame(frame: np.ndarray, degrees: int) -> np.ndarray:
+    """Rotate a camera frame clockwise by 0/90/180/270 degrees."""
+    if degrees == 90:
+        return cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
+    if degrees == 180:
+        return cv2.rotate(frame, cv2.ROTATE_180)
+    if degrees == 270:
+        return cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
+    return frame
 
 
 def open_usable_camera(preferred: int, max_tries: int = 4, res: tuple = (640, 480)):
@@ -116,14 +190,38 @@ def _timestamp_stamp() -> str:
     return _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
 
 
-def _draw(annotated, result) -> None:
-    """Draw box + label + confidence for one recognition result."""
+_LANDMARK_LABELS = ("LE", "RE", "N", "LM", "RM")
+_LANDMARK_COLORS = (
+    (255, 0, 0),
+    (0, 255, 0),
+    (0, 0, 255),
+    (255, 255, 0),
+    (0, 255, 255),
+)
+
+
+def _draw(
+    annotated,
+    result,
+    locked: bool = False,
+    motion=None,
+    show_landmarks: bool = True,
+) -> None:
+    """Draw identity, expression, face-part markers, and motion trails."""
     x1, y1, x2, y2 = (int(v) for v in result.bbox)
     known = result.match.is_known
     color = (0, 200, 0) if known else (0, 0, 255)  # green / red
-    cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 2)
+    thickness = 3 if locked else 2
+    cv2.rectangle(annotated, (x1, y1), (x2, y2), color, thickness)
 
-    label = result.match.display_label
+    identity_label = result.match.display_label
+    if locked:
+        identity_label = f"LOCK {identity_label}"
+    expression = getattr(result, "expression", None)
+    expression_label = expression.display_label if expression is not None else ""
+    label = identity_label
+    if expression_label:
+        label += f" | {expression_label}"
     (text_w, text_h), _baseline = cv2.getTextSize(
         label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 1
     )
@@ -134,9 +232,74 @@ def _draw(annotated, result) -> None:
         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 1, cv2.LINE_AA,
     )
 
+    points = np.asarray(getattr(result, "landmarks", []), dtype=np.float32)
+    if show_landmarks and points.shape == (5, 2) and np.all(np.isfinite(points)):
+        if motion is not None and getattr(motion, "trail", None) is not None:
+            trail = np.asarray(motion.trail, dtype=np.float32)
+            if trail.ndim == 3 and trail.shape[1:] == (5, 2):
+                for part, part_color in enumerate(_LANDMARK_COLORS):
+                    if len(trail) >= 2:
+                        cv2.polylines(
+                            annotated,
+                            [trail[:, part, :].astype(np.int32)],
+                            False,
+                            part_color,
+                            1,
+                            cv2.LINE_AA,
+                        )
 
-def _draw_status_bar(annotated, display_fps: float, recording: bool, record_start):
-    """Top-left strip: FPS + REC indicator + key hints (always visible)."""
+        velocities = (
+            np.asarray(getattr(motion, "velocities", np.zeros((5, 2))), dtype=np.float32)
+            if motion is not None
+            else np.zeros((5, 2), dtype=np.float32)
+        )
+        for part, ((px, py), part_color) in enumerate(zip(points, _LANDMARK_COLORS)):
+            ix, iy = int(px), int(py)
+            # Filled square + outline makes the five face parts easy to see.
+            cv2.rectangle(annotated, (ix - 4, iy - 4), (ix + 4, iy + 4), (0, 0, 0), -1)
+            cv2.rectangle(annotated, (ix - 4, iy - 4), (ix + 4, iy + 4), part_color, 2)
+            cv2.putText(
+                annotated,
+                _LANDMARK_LABELS[part],
+                (ix + 6, iy - 5),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.35,
+                part_color,
+                1,
+                cv2.LINE_AA,
+            )
+            if motion is not None:
+                vx, vy = velocities[part]
+                end = (int(px + vx), int(py + vy))
+                cv2.line(annotated, (ix, iy), end, part_color, 1, cv2.LINE_AA)
+
+    if motion is not None:
+        motion_text = (
+            f"MOVING {motion.score:.2f}"
+            if motion.moving
+            else f"STILL {motion.score:.2f}"
+        )
+        motion_color = (0, 220, 255) if motion.moving else (220, 220, 220)
+        cv2.putText(
+            annotated,
+            motion_text,
+            (x1, min(annotated.shape[0] - 5, y2 + 18)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.45,
+            motion_color,
+            1,
+            cv2.LINE_AA,
+        )
+
+
+def _draw_status_bar(
+    annotated,
+    display_fps: float,
+    recording: bool,
+    record_start,
+    lock_status: str = "off",
+):
+    """Top-left strip: FPS + lock/REC indicators + key hints."""
     h, w = annotated.shape[:2]
     bar = np.full((46, w, 3), 18, dtype=np.uint8)  # dark strip
 
@@ -144,9 +307,14 @@ def _draw_status_bar(annotated, display_fps: float, recording: bool, record_star
                 (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.55,
                 (255, 255, 0), 1, cv2.LINE_AA)
 
-    hint = "s = save photo    r = record video    q = quit"
+    lock_color = (0, 220, 255) if lock_status == "on" else (180, 180, 180)
+    cv2.putText(bar, f"face lock: {lock_status}", (150, 30),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, lock_color, 1, cv2.LINE_AA)
+
+    hint = "s save | r record | l lock | q quit"
     (tw, th), _ = cv2.getTextSize(hint, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
-    cv2.putText(bar, hint, (w - tw - 12, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+    cv2.putText(bar, hint, (max(300, w - tw - 12), 30),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5,
                 (200, 200, 200), 1, cv2.LINE_AA)
 
     if recording:
@@ -161,10 +329,22 @@ def _draw_status_bar(annotated, display_fps: float, recording: bool, record_star
     annotated[0:46, :, :] = bar
 
 
-def _labeled_frame(frame, results) -> np.ndarray:
+def _labeled_frame(
+    frame,
+    results,
+    locked: bool = False,
+    motion_states=None,
+    show_landmarks: bool = True,
+) -> np.ndarray:
     annotated = frame.copy()
     for result in results:
-        _draw(annotated, result)
+        _draw(
+            annotated,
+            result,
+            locked=locked,
+            motion=(motion_states or {}).get(id(result)),
+            show_landmarks=show_landmarks,
+        )
     return annotated
 
 
@@ -174,24 +354,37 @@ class _SharedState:
     def __init__(self) -> None:
         self.lock = threading.Lock()
         self.frame = None        # newest frame from the camera (BGR)
+        self.frame_id = 0        # monotonically increasing camera-frame id
         self.results: list = []  # latest recognition output (may lag the frame)
 
     def publish_frame(self, frame) -> None:
         with self.lock:
             self.frame = frame
+            self.frame_id += 1
 
     def snapshot(self):
-        """Copy of (frame, current results) without blocking the producer long."""
+        """Copy of (frame, results), preserving the original public shape."""
         with self.lock:
             return self.frame, list(self.results)
+
+    def snapshot_with_id(self):
+        """Copy frame data plus its monotonic camera-frame id."""
+        with self.lock:
+            return self.frame, self.frame_id, list(self.results)
 
     def publish_results(self, results) -> None:
         with self.lock:
             self.results = results
 
 
-def recognition_worker(pipeline, state: _SharedState, skip: int,
-                       stop: threading.Event) -> None:
+def recognition_worker(
+    pipeline,
+    state: _SharedState,
+    skip: int,
+    stop: threading.Event,
+    stabilizer=None,
+    require_enrollment: bool = True,
+) -> None:
     """Run the (expensive) pipeline on a background thread.
 
     The camera loop keeps streaming/displaying at the camera's true max FPS;
@@ -199,19 +392,38 @@ def recognition_worker(pipeline, state: _SharedState, skip: int,
     sessions are thread-safe, so calling recognize_frame() here is safe.
     """
     seen = 0
+    last_frame_id = -1
     while not stop.is_set():
-        frame, _ = state.snapshot()
-        if frame is None:
+        snapshot_with_id = getattr(state, "snapshot_with_id", None)
+        if snapshot_with_id is not None:
+            frame, frame_id, _ = snapshot_with_id()
+        else:  # compatibility with simple test doubles / older callers
+            frame, _ = state.snapshot()
+            frame_id = getattr(state, "frame_id", seen)
+        if frame is None or frame_id == last_frame_id:
             time.sleep(0.005)
             continue
+        # Only advance the temporal filter for genuinely new camera frames.
+        # Without frame IDs, a fast worker would process the same held frame
+        # many times and could promote one smile to a false laugh.
         if seen % skip != 0:
             seen += 1
+            last_frame_id = frame_id
             continue
         seen += 1
+        last_frame_id = frame_id
         try:
-            results = pipeline.recognize_frame(frame)
+            results = pipeline.recognize_frame(
+                frame, require_enrollment=require_enrollment
+            )
+            if stabilizer is not None:
+                results = stabilizer.update(results)
         except ValueError as exc:  # empty enrollment db
             print(f"ERROR: {exc}", file=sys.stderr)
+            stop.set()
+            return
+        except Exception as exc:  # keep a model/input failure visible
+            print(f"ERROR: recognition worker stopped: {exc}", file=sys.stderr)
             stop.set()
             return
         state.publish_results(results)
@@ -219,9 +431,23 @@ def recognition_worker(pipeline, state: _SharedState, skip: int,
 
 def main() -> int:
     args = build_parser().parse_args()
+    if args.external_camera:
+        args.camera = 2
+        if args.rotate == 0:
+            args.rotate = 90
+
+    if args.no_expressions and args.expressions_only:
+        print(
+            "ERROR: --no-expressions and --expressions-only cannot be used together.",
+            file=sys.stderr,
+        )
+        return 1
 
     if args.skip < 1:
         print("ERROR: --skip must be >= 1.", file=sys.stderr)
+        return 1
+    if args.motion_threshold < 0:
+        print("ERROR: --motion-threshold must be >= 0.", file=sys.stderr)
         return 1
 
     try:
@@ -231,21 +457,67 @@ def main() -> int:
               file=sys.stderr)
         return 1
 
-    if args.det_size > 0:
-        detector = SCRFDDetector(
-            model_path=DETECTOR_MODEL_PATH,
-            input_size=(args.det_size, args.det_size),
-            confidence_threshold=DETECTOR_CONFIDENCE,
-            nms_threshold=DETECTOR_NMS,
-        )
-    else:
-        detector = None
+    try:
+        if args.det_size > 0:
+            detector = SCRFDDetector(
+                model_path=DETECTOR_MODEL_PATH,
+                input_size=(args.det_size, args.det_size),
+                confidence_threshold=DETECTOR_CONFIDENCE,
+                nms_threshold=DETECTOR_NMS,
+            )
+        else:
+            detector = None
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"SETUP ERROR: {exc}", file=sys.stderr)
+        return 1
+
+    expression_classifier = None
+    if not args.no_expressions:
+        try:
+            expression_classifier = ExpressionClassifier(
+                model_path=args.expression_model,
+                input_size=EXPRESSION_INPUT_SIZE,
+                confidence_threshold=args.expression_threshold,
+                mouth_open_threshold=args.mouth_open_threshold,
+                laugh_frames=args.laugh_frames,
+            )
+        except Exception as exc:
+            print(
+                f"WARNING: expression detection disabled ({exc}).\n"
+                "Run `python -m scripts.download_models` or use "
+                "--no-expressions to hide this message.",
+                file=sys.stderr,
+            )
 
     try:
-        pipeline = RecognitionPipeline(detector=detector)
+        pipeline = RecognitionPipeline(
+            detector=detector,
+            threshold=args.threshold,
+            expression_classifier=expression_classifier,
+            enable_expressions=not args.no_expressions,
+            enable_identity=not args.expressions_only,
+        )
     except (FileNotFoundError, EnrollmentError) as exc:
         print(f"SETUP ERROR: {exc}", file=sys.stderr)
         return 1
+
+    if args.expressions_only and pipeline.expression_classifier is None:
+        print(
+            "ERROR: --expressions-only needs models/emotion-ferplus-8.onnx. "
+            "Run `python -m scripts.download_models`.",
+            file=sys.stderr,
+        )
+        return 1
+
+    stabilizer = None
+    if pipeline.expression_classifier is not None:
+        stabilizer = ExpressionStabilizer(
+            laugh_frames=args.laugh_frames,
+            mouth_open_threshold=args.mouth_open_threshold,
+            confidence_threshold=args.expression_threshold,
+        )
+    else:
+        print("NOTE: expression labels are disabled; identity recognition is still active.")
 
     cap, used_index = open_usable_camera(args.camera, res=(width, height))
     if cap is None:
@@ -259,18 +531,42 @@ def main() -> int:
         print(f"NOTE: using camera index {used_index} "
               f"(index {args.camera} was black or unavailable).")
 
+    # Face lock is applied to the latest recognition results in the display
+    # loop, so the expensive worker can keep processing frames independently.
+    face_lock = FaceLock()
+    if args.lock_face:
+        face_lock.enable()
+    motion_tracker = LandmarkMotionTracker(
+        motion_threshold=args.motion_threshold
+    )
+
     # Background recognition: the display loop never waits for the pipeline.
     state = _SharedState()
     stop = threading.Event()
     worker = threading.Thread(
         target=recognition_worker,
-        args=(pipeline, state, args.skip, stop),
+        args=(
+            pipeline,
+            state,
+            args.skip,
+            stop,
+            stabilizer,
+            not args.expressions_only,
+        ),
         daemon=True,
     )
     worker.start()
 
     print(f"Saved photos/videos go to: {DOWNLOADS_DIR}")
-    print("Controls: s = save photo | r = start/stop video | q/ESC = quit")
+    if args.external_camera:
+        print("External camera mode: device 2, rotated 90 degrees")
+    print("Controls: s = save photo | r = start/stop video | l = lock face | q/ESC = quit")
+    if pipeline.expression_classifier is not None:
+        print("Expressions: smile / laugh / angry are shown after each face label")
+    if args.lock_face:
+        print("Face lock ON - the largest visible face will be selected")
+    if args.expressions_only:
+        print("Identity gallery is not required in --expressions-only mode")
     fps_window = 30
     fps_times = []
     writer = None          # cv2.VideoWriter while recording
@@ -285,9 +581,18 @@ def main() -> int:
                 print("ERROR: lost the webcam stream. Quitting.", file=sys.stderr)
                 break
 
+            frame = _rotate_frame(frame, args.rotate)
             state.publish_frame(frame)
             _, results = state.snapshot()
-            annotated = _labeled_frame(frame, results)
+            display_results = face_lock.filter(results)
+            motion_states = motion_tracker.update(display_results)
+            annotated = _labeled_frame(
+                frame,
+                display_results,
+                locked=face_lock.locked,
+                motion_states=motion_states,
+                show_landmarks=not args.no_landmarks,
+            )
 
             # display-rate counter so you can SEE the video is not slowed down
             fps_times.append(t0)
@@ -302,12 +607,26 @@ def main() -> int:
                 rec_fps = max(5.0, min(disp, 120.0)) if disp > 0 else rec_fps
                 writer.write(annotated)
 
-            _draw_status_bar(annotated, disp, writer is not None, record_start)
-            cv2.imshow("Face Recognition (ArcFace + ONNX)", annotated)
+            _draw_status_bar(
+                annotated,
+                disp,
+                writer is not None,
+                record_start,
+                lock_status=face_lock.status,
+            )
+            cv2.imshow("Face Recognition + Expressions (ArcFace + FER+)", annotated)
             key = cv2.waitKey(1) & 0xFF
 
+            # ---- face lock toggle: 'l' ----------------------------------
+            if key == ord("l"):
+                enabled = face_lock.toggle(results)
+                print(
+                    f"Face lock {'ON' if enabled else 'OFF'}"
+                    + (f" ({face_lock.status})" if enabled else "")
+                )
+
             # ---- photo capture: 's' -------------------------------------
-            if key == ord("s"):
+            elif key == ord("s"):
                 name = f"fr_capture_{_timestamp_stamp()}.jpg"
                 path = os.path.join(DOWNLOADS_DIR, name)
                 if cv2.imwrite(path, annotated):
